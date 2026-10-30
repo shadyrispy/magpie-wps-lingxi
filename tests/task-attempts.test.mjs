@@ -72,17 +72,20 @@ test('expert (aigc) and client (cowork) attempts send the right flags; cookies c
     const aigcChats = net.calls.filter((c) => c.url.includes('/api/aigc/v3/assistant/sessions/') && c.url.endsWith('/completions'))
     assert.equal(aigcChats.length, 1)
     assert.equal(aigcChats[0].body.with_expert, true)
+    assert.equal(aigcChats[0].body.expect_model, 'plan_pro')
 
-    // 客户端任务：cowork 平面，client_type 三处（会话 / run / 请求头）
+    // 客户端任务：cowork 平面，client_type 用白名单值 lingxi_claw（服务端自己映射成
+    // Product-Name=365wps-lingxi-client；直接发 Product-Name 会被风控拒）
     const sessions = net.calls.filter((c) => c.url.endsWith('/api/aioffice/v1/cowork/sessions'))
     assert.equal(sessions.length, 1)
-    assert.equal(sessions[0].body.client_type, '365wps-lingxi-client')
+    assert.equal(sessions[0].body.client_type, 'lingxi_claw')
     const runs = net.calls.filter((c) => c.url.endsWith('/api/public/v1/credits/runs'))
     assert.equal(runs.length, 1)
-    assert.equal(runs[0].body.client_type, '365wps-lingxi-client')
+    assert.equal(runs[0].body.client_type, 'lingxi_claw')
     const chats = net.calls.filter((c) => c.url.endsWith('/api/public/v1/agent-runtime/chat/completions'))
     assert.equal(chats.length, 1)
-    assert.equal(chats[0].headers['X-Client-Type'], '365wps-lingxi-client')
+    assert.equal(chats[0].headers['X-Client-Type'], 'lingxi_claw')
+    assert.ok(!JSON.stringify(net.calls.map((c) => c.body)).includes('365wps-lingxi-client'), 'Product-Name 不该出现在请求体里')
 
     // 所有请求的 Cookie 都带客户端标识
     for (const c of net.calls) {

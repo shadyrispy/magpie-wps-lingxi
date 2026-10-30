@@ -1258,7 +1258,7 @@ async function deleteGroupChat(cookie, base, channelId) {
 // 不能假设成功（更不会伪造 claimed）。
 // 专家模式走网页端同款 aigc 平面：session_mode:"expert" 建会话 + with_expert:true 发对话。
 // 这是渲染层 `createSession(..., {session_mode:"expert"})` 的原样复刻，纯 HTTP。
-async function runExpertConversationViaAigc(cookie, base, text = "hi") {
+async function runExpertConversationViaAigc(cookie, base, text = TASK_TEXT) {
   const headers = {
     Cookie: clientCookie(cookie),
     "Content-Type": "application/json",
@@ -1282,7 +1282,6 @@ async function runExpertConversationViaAigc(cookie, base, text = "hi") {
   const payload = {
     question: text,
     expect_model: "plan_pro",
-    model: "plan_pro",
     user_input: { text },
     thinking: "auto",
     with_mcp: false,
@@ -1299,12 +1298,28 @@ async function runExpertConversationViaAigc(cookie, base, text = "hi") {
   return { ok: true, detail: "aigc 专家对话完成" }
 }
 
-async function runTaskConversation(cookie, base, { clientType, sessionMode, text }) {
-  const model = "plan_pro" // 桌面端默认模型，账号目录里必有
+// client_type 只能取白名单值（lingxi_claw / pc_web / …）；
+// "365wps-lingxi-client" 是服务端从 lingxi_claw 映射出的网关 Product-Name，
+// 直接当 client_type 发会话会被上游走到异常路径（实测 AuditFailed）。
+// 文案也不能用 "hi" 这类裸词——cowork 平面的风控会拒（实测 AuditFailed）。
+const TASK_TEXT = "请用一句话介绍你自己"
+
+async function pickTaskModel(cookie, base) {
+  try {
+    const skip = new Set(["auto", "plan_pro", "plan_max"])
+    const list = await fetchModelPlans(cookie, base)
+    const found = Array.isArray(list) ? list.find((m) => m?.id && !skip.has(m.id)) : null
+    if (found?.id) return found.id
+  } catch {}
+  return "deepseek-v4.1-flash"
+}
+
+async function runTaskConversation(cookie, base, { clientType, sessionMode, text } = {}) {
+  const model = await pickTaskModel(cookie, base)
   const body = {
     stream: false,
     model,
-    messages: [{ role: "user", content: text || "hi" }],
+    messages: [{ role: "user", content: text || TASK_TEXT }],
     max_tokens: 256,
   }
   const errorResponse = (message, status = 502, code = "upstream_error") => new Response(
@@ -1321,7 +1336,6 @@ async function runTaskConversation(cookie, base, { clientType, sessionMode, text
       errorResponse,
       clientType,
       sessionMode,
-      currentMode: sessionMode === "expert" ? "expert" : undefined,
     })
     const text2 = await response.text().catch(() => "")
     if (!response.ok) return { ok: false, detail: `HTTP ${response.status} ${text2.slice(0, 120)}` }
@@ -1378,13 +1392,13 @@ async function completeOneTimeTasks(cookie, base, tasks) {
 
   // 客户端任务：cowork 平面 + 客户端身份（client_type 三处：会话/run/头）+ x-kso Cookie
   if (needClient && !poor) {
-    const r = await runTaskConversation(cookie, base, { clientType: "365wps-lingxi-client", text: "hi" })
+    const r = await runTaskConversation(cookie, base, { clientType: "lingxi_claw", text: TASK_TEXT })
     msg.push(r.ok ? "客户端对话 ✓" : `客户端对话失败(${r.detail || "?"})`)
   }
 
   // 专家任务：网页端同款 aigc 平面（session_mode=expert + with_expert=true）
   if (needExpert && !poor) {
-    const r = await runExpertConversationViaAigc(cookie, base, "hi")
+    const r = await runExpertConversationViaAigc(cookie, base)
     msg.push(r.ok ? "专家模式对话 ✓" : `专家模式对话失败(${r.detail || "?"})`)
   }
 
@@ -2013,6 +2027,9 @@ export const _internal = {
   findBrowser,
   browserCandidates,
   summarizeExpiring,
+  runExpertConversationViaAigc,
+  runTaskConversation,
+  agentChat,
   browserLogin,
   safariLogin,
   chromiumLogin,

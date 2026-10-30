@@ -71,6 +71,13 @@ POST /api/public/v1/tasks/{task_key}/claim         # 领奖（空 body，可选 
 - `365wps-lingxi-client` 与 `365wps_lingxi_expert` 在二进制里是**相邻的静态字符串对**
 - 专家模式在网页层是建会话时带 `session_mode:"expert"`；`expert_id` 是 JSON 字段（传 `null` 会被拒）
 
+### 2.35 两个实测坑（0.3.10，勿踩）
+1. `client_type` 只能填白名单值（`lingxi_claw` / `pc_web` / …）。
+   把网关 Product-Name（`365wps-lingxi-client`）当 client_type 发会话/run，
+   上游返回 AuditFailed（"我还在不断学习中"）——它不是 client_type，是映射结果。
+2. cowork 平面对话文案用裸词（"hi"）会被风控拒（AuditFailed）；
+   aigc 平面不受影响。用一句正常的话即可。
+
 ### 2.4 插件走的通路
 ```
 POST /api/aioffice/v1/cowork/sessions      # 建会话（可带 client_type / session_mode）

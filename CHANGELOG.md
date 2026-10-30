@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.10 — 2026-10-31
+
+真账号实测修正（两条信号链现已端到端跑通）：
+
+- **修正 client_type 语义**：`client_type` 只能取白名单值（`lingxi_claw` / `pc_web` / …）。
+  0.3.9 把网关 Product-Name `365wps-lingxi-client` 当 client_type 发会话，
+  上游直接 AuditFailed。服务端自己把 `lingxi_claw` 映射成 365wps-lingxi-client。
+- **对话文案不能用裸词**：`"hi"` 在 cowork 平面会被风控拒（AuditFailed），改用真实句子。
+- **模型从账号目录动态挑**（跳过 plan_pro/plan_max/auto），不再写死。
+- 实测：aigc 专家对话 ✓、cowork 客户端对话 ✓（x-kso Cookie 全程在发）。
+- `tests/test_signals.mjs`：对当前账号实测两条信号链的脚本。
+
 ## 0.3.9 — 2026-10-31
 
 继续死磕纯协议的任务完成（不引入 app-server）：
