@@ -88,7 +88,7 @@ Claude Code、Codex、Cursor 等任何支持 OpenAI 格式的客户端。
 | 多账号 | ✅ | 按 `uid` 区分（无 uid 用 sid 尾部），不互相覆盖 |
 | 错误语义 | ✅ | 模型/参数错误 → 404；明确鉴权失败 → 401 |
 | 一次性任务·群聊 | ✅ | 建群 → 解散 → 重拉任务 → 领取 |
-| 一次性任务·专家/客户端 | ❌ | 服务端按「真实客户端对话」判定；纯 HTTP 实测无法翻转（上游 PR #5 用 app-server 才能做，本版按纯 HTTP 取舍删掉了） |
+| 一次性任务·专家/客户端 | ⚠️ 尝试 | 纯协议各发一次带标志的最小对话（`session_mode=expert` / `client_type=365wps-lingxi-client`）后重拉任务；是否翻转由服务端判定，插件如实回报，不伪造 |
 | 脚手架 | ✅ | `check.mjs` 30 通过 / 0 警告 / 0 失败；`score.mjs` 身份门通过、自动分 65/65 |
 
 > 未对齐的只有一项：`try_expert_mode` / `use_lingxi_client` 两个一次性任务。需要的话可以加回

@@ -280,31 +280,74 @@ function which(name) {
 
 // 任意 Chromium 内核浏览器都能用（CDP 读 Cookie），不止 Chrome/Edge。
 // 国内常见的 360/QQ/搜狗 也走这条路；360 安全浏览器可能吞掉调试参数，失败时给明确提示。
-const WIN_BROWSER_RELATIVE = [
-  ["Google", "Chrome", "Application", "chrome.exe"],
-  ["Microsoft", "Edge", "Application", "msedge.exe"],
-  ["BraveSoftware", "Brave-Browser", "Application", "brave.exe"],
-  ["Chromium", "Application", "chrome.exe"],
-  ["Vivaldi", "Application", "vivaldi.exe"],
-  ["360Chrome", "Chrome", "Application", "360chrome.exe"],
-  ["360", "360Chrome", "Chrome", "Application", "360chrome.exe"],
-  ["360se6", "Application", "360se6.exe"],
-  ["360", "360se6", "Application", "360se6.exe"],
-  ["Tencent", "QQBrowser", "Application", "QQBrowser.exe"],
-  ["SogouExplorer", "SogouExplorer.exe"],
-]
-
+// Windows 的浏览器候选顺序照搬 magicrew 插件的实测结论：
+// Chrome / Chromium 优先 → 国产 Chromium 系 → Edge 最后（策略最多、最容易被拦）。
+// ⚠ 两个真实文件名很容易写错：
+//   · 360 安全浏览器是 360se.exe（不是 360se6.exe）；
+//   · 360 极速浏览器 X 是 360ChromeX.exe（不在 360Chrome 目录下）。
 const WIN_REGISTRY_BROWSERS = [
   "chrome.exe",
-  "msedge.exe",
+  "360ChromeX.exe",
   "360chrome.exe",
-  "360se6.exe",
+  "360se.exe",
   "QQBrowser.exe",
   "brave.exe",
   "vivaldi.exe",
   "opera.exe",
   "SogouExplorer.exe",
+  "2345Explorer.exe",
+  "liebao.exe",
+  "Maxthon.exe",
+  "UCBrowser.exe",
+  "Quark.exe",
+  "msedge.exe",
 ]
+
+function winBrowserPaths(env) {
+  const local = env.LOCALAPPDATA || ""
+  const roaming = env.APPDATA || ""
+  const home = env.USERPROFILE || env.HOME || ""
+  const pf = env.PROGRAMFILES || "C:" + String.fromCharCode(92) + "Program Files"
+  const pf86 = env["PROGRAMFILES(X86)"] || env["ProgramFiles(x86)"] || "C:" + String.fromCharCode(92) + "Program Files (x86)"
+  const under = (root, parts) => (root ? join(root, ...parts) : "")
+  return [
+    under(pf, ["Google", "Chrome", "Application", "chrome.exe"]),
+    under(pf86, ["Google", "Chrome", "Application", "chrome.exe"]),
+    under(local, ["Google", "Chrome", "Application", "chrome.exe"]),
+    under(home, ["scoop", "apps", "chromium", "current", "chrome.exe"]),
+    under(local, ["Chromium", "Application", "chrome.exe"]),
+    under(pf, ["Chromium", "Application", "chrome.exe"]),
+    under(pf86, ["Chromium", "Application", "chrome.exe"]),
+    under(home, ["Chromium", "chrome.exe"]),
+    under(pf, ["BraveSoftware", "Brave-Browser", "Application", "brave.exe"]),
+    under(pf86, ["BraveSoftware", "Brave-Browser", "Application", "brave.exe"]),
+    under(local, ["BraveSoftware", "Brave-Browser", "Application", "brave.exe"]),
+    under(local, ["Vivaldi", "Application", "vivaldi.exe"]),
+    under(pf, ["Vivaldi", "Application", "vivaldi.exe"]),
+    under(local, ["Programs", "Opera", "opera.exe"]),
+    under(roaming, ["Opera Software", "Opera Stable", "opera.exe"]),
+    under(local, ["360ChromeX", "Chrome", "Application", "360ChromeX.exe"]),
+    under(local, ["360Chrome", "Chrome", "Application", "360chrome.exe"]),
+    under(local, ["360Chrome", "Chrome", "Application", "360Chrome.exe"]),
+    under(pf, ["360Chrome", "Chrome", "Application", "360chrome.exe"]),
+    under(pf86, ["360Chrome", "Chrome", "Application", "360chrome.exe"]),
+    under(roaming, ["secoresdk", "360se6", "Application", "360se.exe"]),
+    under(local, ["360se", "Application", "360se.exe"]),
+    under(local, ["Tencent", "QQBrowser", "Application", "QQBrowser.exe"]),
+    under(pf, ["Tencent", "QQBrowser", "QQBrowser.exe"]),
+    under(local, ["SogouExplorer", "SogouExplorer.exe"]),
+    under(pf, ["SogouExplorer", "SogouExplorer.exe"]),
+    under(local, ["2345Explorer", "2345Explorer.exe"]),
+    under(local, ["liebao", "liebao.exe"]),
+    under(roaming, ["Maxthon3", "Bin", "Maxthon.exe"]),
+    under(local, ["UCBrowser", "Application", "UCBrowser.exe"]),
+    under(local, ["Quark", "Quark.exe"]),
+    under(pf86, ["Microsoft", "Edge", "Application", "Microsoft Edge.exe"]),
+    under(pf, ["Microsoft", "Edge", "Application", "Microsoft Edge.exe"]),
+    under(pf86, ["Microsoft", "Edge", "Application", "msedge.exe"]),
+    under(pf, ["Microsoft", "Edge", "Application", "msedge.exe"]),
+  ].filter(Boolean)
+}
 
 function registryAppPath(exe) {
   const roots = ["HKCU", "HKLM"]
@@ -346,13 +389,10 @@ function browserCandidates(platform = process.platform, env = process.env, looku
       "/Applications/QQ浏览器.app/Contents/MacOS/QQBrowser",
     )
   } else if (platform === "win32") {
+    candidates.push(...winBrowserPaths(env))
     for (const exe of WIN_REGISTRY_BROWSERS) {
       const found = lookup(exe)
       if (found) candidates.push(found)
-    }
-    const roots = [env.PROGRAMFILES, env["PROGRAMFILES(X86)"], env.LOCALAPPDATA].filter(Boolean)
-    for (const root of roots) {
-      for (const parts of WIN_BROWSER_RELATIVE) candidates.push(join(root, ...parts))
     }
   } else {
     for (const name of ["google-chrome", "chromium", "chromium-browser", "microsoft-edge", "brave-browser", "vivaldi"]) {
@@ -692,10 +732,11 @@ async function postJson(url, cookie, base, body, signal, extra = {}) {
   return payload
 }
 
-async function createCoworkSession(base, cookie, signal) {
+async function createCoworkSession(base, cookie, signal, extra = {}) {
   const payload = await postJson(`${base}${AGENT_SESSIONS_PATH}`, cookie, base, {
     session_type: "cowork_client",
     agent_version: 2,
+    ...extra,
     env: {
       device_id: createHash("sha256").update("magpie-lingxi-device").digest("hex"),
       device_name: userInfo().username || "magpie",
@@ -729,14 +770,14 @@ async function createCreditsRun(base, cookie, sessionId, model, title, signal) {
   return id
 }
 
-async function ensureRun(cookie, key, model, title, signal) {
+async function ensureRun(cookie, key, model, title, signal, extra = {}) {
   const hit = runs.get(key)
   if (hit && Date.now() - hit.at < RUN_TTL_MS) return hit
   let lastError
   // 先试 wps.cn（reference 实测的平面），404/401 再回落登录用的 kdocs 域名。
   for (const base of [BASE, KDOCS_BASE]) {
     try {
-      const sessionId = await createCoworkSession(base, cookie, signal)
+      const sessionId = await createCoworkSession(base, cookie, signal, extra)
       const runId = await createCreditsRun(base, cookie, sessionId, model, title, signal)
       const run = { base, sessionId, runId, at: Date.now() }
       runs.set(key, run)
@@ -936,10 +977,14 @@ function foldFrames(frames) {
   return result
 }
 
-async function requestAgent(cookie, run, payload, signal) {
+async function requestAgent(cookie, run, payload, signal, clientType) {
   const response = await fetch(`${run.base}${AGENT_CHAT_PATH}`, {
     method: "POST",
-    headers: agentHeaders(cookie, run.base, { "x-cc-session-id": run.sessionId, "x-cc-run-id": run.runId }),
+    headers: agentHeaders(cookie, run.base, {
+      "x-cc-session-id": run.sessionId,
+      "x-cc-run-id": run.runId,
+      ...(clientType ? { "X-Client-Type": clientType } : {}),
+    }),
     body: JSON.stringify(payload),
     signal,
   })
@@ -965,18 +1010,22 @@ function chatErrorStatus(error) {
   return status >= 500 ? status : 502
 }
 
-async function agentChat({ cookie, body, stream, requestedModel, signal, errorResponse }) {
-  const key = `${identityOf(cookie)}|${requestedModel}`
+async function agentChat({ cookie, body, stream, requestedModel, signal, errorResponse, clientType, sessionMode }) {
+  const key = `${identityOf(cookie)}|${requestedModel}|${clientType || ""}|${sessionMode || ""}`
   const payload = buildAgentBody(body, requestedModel)
-  let run = await ensureRun(cookie, key, requestedModel, lastUserText(body), signal)
+  const sessionExtra = {
+    ...(clientType ? { client_type: clientType } : {}),
+    ...(sessionMode ? { session_mode: sessionMode } : {}),
+  }
+  let run = await ensureRun(cookie, key, requestedModel, lastUserText(body), signal, sessionExtra)
   let response
   try {
-    response = await requestAgent(cookie, run, payload, signal)
+    response = await requestAgent(cookie, run, payload, signal, clientType)
   } catch (error) {
     if (!looksLikeStaleRun(error.message)) throw error
     runs.delete(key)
-    run = await ensureRun(cookie, key, requestedModel, lastUserText(body), signal)
-    response = await requestAgent(cookie, run, payload, signal)
+    run = await ensureRun(cookie, key, requestedModel, lastUserText(body), signal, sessionExtra)
+    response = await requestAgent(cookie, run, payload, signal, clientType)
   }
 
   const translator = new LingxiTranslator(requestedModel)
@@ -1152,21 +1201,74 @@ async function deleteGroupChat(cookie, base, channelId) {
  * 余额为 0 时不做任何消耗性动作。
  * 返回 { bonus, message }。
  */
+// 为了让「专家模式 / 使用客户端」两个任务有机会被服务端判定，发一次最小对话：
+//   · 客户端任务：请求头与会话都标成 365wps-lingxi-client
+//   · 专家任务：会话参数带 session_mode=expert，agent_input.current_mode=expert
+// 纯 HTTP 只能做到这些；是否算完成由服务端决定，所以调用方必须重拉任务看状态，
+// 不能假设成功（更不会伪造 claimed）。
+async function runTaskConversation(cookie, base, { clientType, sessionMode, text }) {
+  const model = "qwen3.8_flash"
+  const body = {
+    stream: false,
+    model,
+    messages: [{ role: "user", content: text || "hi" }],
+    max_tokens: 16,
+  }
+  const errorResponse = (message, status = 502, code = "upstream_error") => new Response(
+    JSON.stringify({ error: { message, code } }),
+    { status, headers: { "Content-Type": "application/json" } },
+  )
+  try {
+    const response = await agentChat({
+      cookie,
+      body,
+      stream: false,
+      requestedModel: model,
+      signal: AbortSignal.timeout(120000),
+      errorResponse,
+      clientType,
+      sessionMode,
+    })
+    await response.text().catch(() => "")
+    return response.ok
+  } catch {
+    return false
+  }
+}
+
 async function completeOneTimeTasks(cookie, base, tasks) {
   const msg = []
   let bonus = 0
 
   const claimNow = []
   let needGroup = false
+  let needExpert = false
+  let needClient = false
   for (const task of tasks || []) {
     if (task?.type !== "one_time" || !task?.task_key) continue
     if (task.status === "claimable") claimNow.push(task.task_key)
-    else if (task.status === "incomplete" && task.action === "group_chat") needGroup = true
+    else if (task.status === "incomplete") {
+      if (task.action === "group_chat") needGroup = true
+      else if (task.action === "expert_mode") needExpert = true
+      else if (task.action === "download_client") needClient = true
+    }
   }
 
   const bal = await balanceTotal(cookie, base)
   const poor = bal !== null && bal <= 0
-  if (poor && needGroup) msg.push("余额不足，跳过建群")
+  if (poor && (needGroup || needExpert || needClient)) msg.push("余额不足，跳过需要消耗的任务")
+
+  // 客户端任务：用客户端身份跑一次最小对话（服务端按网关门判定）
+  if (needClient && !poor) {
+    const ok = await runTaskConversation(cookie, base, { clientType: "365wps-lingxi-client", text: "hi" })
+    msg.push(ok ? "客户端对话 ✓" : "客户端对话失败")
+  }
+
+  // 专家任务：会话标 expert + current_mode=expert
+  if (needExpert && !poor) {
+    const ok = await runTaskConversation(cookie, base, { sessionMode: "expert", text: "hi" })
+    msg.push(ok ? "专家模式对话 ✓" : "专家模式对话失败")
+  }
 
   if (needGroup && !poor) {
     const sid = await pickGroupChatSession(cookie, base)
@@ -1773,6 +1875,7 @@ export const _internal = {
   resolveCookie,
   resolveBase,
   findBrowser,
+  browserCandidates,
   browserLogin,
   safariLogin,
   chromiumLogin,
