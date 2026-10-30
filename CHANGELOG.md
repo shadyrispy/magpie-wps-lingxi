@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.14 — 2026-10-31
+
+- 修复 CI：`.github/workflows/regression.yml` 里残留着 PR #5 合并时的冲突标记，
+  导致 GitHub Actions 每次推送都 "No jobs were run" 并发失败邮件；
+  现在改为跑 `node --test`（tests/ 下全部 31 条）。
+
 ## 0.3.13 — 2026-10-31
 
 - 新增 `docs/TESTER-GUIDE.md`：测试者一站式指引（安装 → 三级自测 → 回报模板）。
