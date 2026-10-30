@@ -1264,15 +1264,19 @@ async function fetchModelPlans(cookie, base = BASE) {
 
 const DESKTOP_APP_NAME = "WPS 灵犀"
 
-function desktopDataDir(explicit) {
-  if (explicit && String(explicit).trim()) return String(explicit).trim()
+// 自动找客户端数据目录（不同版本/渠道的目录名不一样），不需要用户填路径。
+function desktopDataDirs(explicit) {
+  if (explicit && String(explicit).trim()) return [String(explicit).trim()]
+  const names = [DESKTOP_APP_NAME, "Lingxi", "lingxi", "lingxi-desktop"]
+  const roots = []
   if (process.platform === "win32") {
-    return join(process.env.APPDATA || join(homedir(), "AppData", "Roaming"), DESKTOP_APP_NAME)
+    roots.push(process.env.APPDATA || join(homedir(), "AppData", "Roaming"))
+  } else if (process.platform === "darwin") {
+    roots.push(join(homedir(), "Library", "Application Support"))
+  } else {
+    roots.push(join(homedir(), ".config"))
   }
-  if (process.platform === "darwin") {
-    return join(homedir(), "Library", "Application Support", DESKTOP_APP_NAME)
-  }
-  return join(homedir(), ".config", DESKTOP_APP_NAME)
+  return roots.flatMap((root) => names.map((name) => join(root, name)))
 }
 
 // DPAPI(CurrentUser) —— 借 PowerShell 一次，不引入原生依赖。
@@ -1336,9 +1340,10 @@ async function sqliteAll(file, sql) {
 }
 
 async function importLocalAccount(explicitDir) {
-  const dataDir = desktopDataDir(explicitDir)
-  if (!existsSync(join(dataDir, "Local State"))) {
-    return { error: `没有在这个目录找到灵犀客户端数据：${dataDir}` }
+  const dirs = desktopDataDirs(explicitDir)
+  const dataDir = dirs.find((dir) => existsSync(join(dir, "Local State")))
+  if (!dataDir) {
+    return { error: `没有找到灵犀客户端数据目录（找过：${dirs.join("、")}）。装了客户端并登录过一次后再试，或用 MAGPIE_LINGXI_HOME 指定目录` }
   }
   let key
   try { key = chromiumKey(dataDir) } catch (error) { return { error: `读取客户端密钥失败：${error.message}` } }
@@ -1677,17 +1682,8 @@ export async function WPSLingxiAuthPlugin(input = {}, options = {}) {
           // 客户端已经登录过时最省事：直接读它的 Cookie 库，不弹浏览器、不重登。
           type: "api",
           label: "导入本机灵犀客户端账号",
-          prompts: [
-            {
-              key: "dir",
-              label: "客户端数据目录（留空自动检测）",
-              type: "text",
-              placeholder: "例如 C:\Users\你\AppData\Roaming\WPS 灵犀",
-              required: false,
-            },
-          ],
           async authorize(inputs) {
-            const cred = await importLocalAccount(inputs?.dir)
+            const cred = await importLocalAccount(inputs?.dir || process.env.MAGPIE_LINGXI_HOME)
             if (cred?.error) return { type: "failed", error: cred.error }
             return {
               type: "success",
