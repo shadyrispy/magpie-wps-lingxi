@@ -33,6 +33,7 @@ const KSO_COOKIE_PARTS = [
   `x-kso-device-id=${DEVICE_ID}`,
 ]
 function clientCookie(cookie) {
+  if (process.env.MAGPIE_LINGXI_NO_KSO === "1") return cookie || ""
   return cookie ? `${cookie}; ${KSO_COOKIE_PARTS.join("; ")}` : KSO_COOKIE_PARTS.join("; ")
 }
 // 15 天内到期 = 临时积分（与 jet 插件同一判据）；可用 MAGPIE_LINGXI_TEMP_DAYS 调整。
