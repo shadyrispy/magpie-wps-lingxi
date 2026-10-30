@@ -123,6 +123,26 @@ function toIso(value) {
   return m ? `${m[1]}T${m[2]}${m[2].length === 5 ? ":00" : ""}+08:00` : text
 }
 
+// 汇总「临时积分」：只算未过期、且在窗口内的赠送批次。
+// 纯函数，便于对边界（正好 15 天、已过期、坏时间）做单测。
+function summarizeExpiring(items, nowMs = Date.now(), windowMs = TEMP_CREDIT_WINDOW_MS) {
+  const out = { balance: 0, value: 0, consumed: 0, earliest: "" }
+  for (const item of Array.isArray(items) ? items : []) {
+    const expireMs = Date.parse(item?.expire_time ?? "")
+    if (!Number.isFinite(expireMs) || expireMs <= nowMs) continue
+    if (windowMs > 0 && expireMs - nowMs > windowMs) continue
+    const balance = Number(item.balance ?? 0)
+    const value = Number(item.value ?? 0)
+    const consumed = Number(item.consumed ?? Math.max(0, value - balance))
+    if (![balance, value, consumed].every(Number.isFinite)) continue
+    out.balance += balance
+    out.value += value
+    out.consumed += consumed
+    if (!out.earliest || expireMs < Date.parse(out.earliest)) out.earliest = String(item.expire_time)
+  }
+  return out
+}
+
 // "2026-11-30T07:06:59+08:00" -> "11-30"
 function creditDateLabel(value) {
   const text = String(value ?? "")
@@ -162,9 +182,11 @@ function parseCookieInput(raw) {
   if (!sid) return null
 
   const uid = pairs.get("uid") || ""
-  const cookie = `wps_sid=${sid}${uid ? `; uid=${uid}` : ""}`
+  // 灰度 region：客户端从 cookie copilot_server_branch 读，随请求发 X-Cc-Region。
+  const region = pairs.get("copilot_server_branch") || ""
+  const cookie = `wps_sid=${sid}${uid ? `; uid=${uid}` : ""}${region ? `; copilot_server_branch=${region}` : ""}`
   const accountId = uid ? `wps-${uid}` : `wps-${sid.slice(-8)}`
-  return { sid, uid, cookie, accountId }
+  return { sid, uid, region, cookie, accountId }
 }
 
 
@@ -218,6 +240,7 @@ function normalizeCredential(raw) {
   return {
     sid: cred.sid,
     uid: cred.uid,
+    region: cred.region || "",
     identity: identityOf(cred.sid),
     cookie: cred.cookie,
     accountId: cred.accountId,
@@ -404,7 +427,17 @@ function browserCandidates(platform = process.platform, env = process.env, looku
 }
 
 function findBrowser() {
-  return browserCandidates().find((file) => existsSync(file)) || ""
+  // 常见安装路径先查（快）；一个都没有才去翻注册表（最多 60 次 reg，慢）。
+  const plain = browserCandidates(process.platform, process.env, () => "")
+  const hit = plain.find((file) => existsSync(file))
+  if (hit) return hit
+  if (process.platform === "win32") {
+    for (const exe of WIN_REGISTRY_BROWSERS) {
+      const found = registryAppPath(exe)
+      if (found) return found
+    }
+  }
+  return ""
 }
 
 async function waitForFile(file, timeoutMs) {
@@ -1288,7 +1321,7 @@ async function completeOneTimeTasks(cookie, base, tasks) {
   // 重拉任务，领取所有 claimable（含刚被动作带出来的）
   const after = await listTasks(cookie, base)
   const toClaim = after
-    ? after.filter((t) => t?.task_key && t.status === "claimable").map((t) => t.task_key)
+    ? after.filter((t) => t?.type === "one_time" && t?.task_key && t.status === "claimable").map((t) => t.task_key)
     : claimNow
   const got = []
   for (const key of toClaim) {
@@ -1655,14 +1688,14 @@ export async function WPSLingxiAuthPlugin(input = {}, options = {}) {
             throw new Error("Invalid upstream credit values")
           }
 
+          const nowMs = Date.now()
           let earliestExpire = ""
           const bonusItems = data.bonus_credits || data.bonus_summary?.items || []
           for (const item of bonusItems) {
-            if (item.balance > 0 && item.expire_time) {
-              if (!earliestExpire || item.expire_time < earliestExpire) {
-                earliestExpire = item.expire_time
-              }
-            }
+            if (!(item.balance > 0) || !item.expire_time) continue
+            const expireMs = Date.parse(item.expire_time)
+            if (!Number.isFinite(expireMs) || expireMs <= nowMs) continue
+            if (!earliestExpire || expireMs < Date.parse(earliestExpire)) earliestExpire = item.expire_time
           }
 
           // 路由页和额度面板要的是“窗口”（总额/剩余/已用/重置时间），
@@ -1673,21 +1706,7 @@ export async function WPSLingxiAuthPlugin(input = {}, options = {}) {
 
           // 临时积分：15 天内到期的赠送批次（与 jet 插件同一判据）。
           // 上游 bonus_credits 每个批次都带 balance / value / consumed / expire_time。
-          const nowMs = Date.now()
-          const expiring = { balance: 0, value: 0, consumed: 0, earliest: "" }
-          for (const item of bonusItems) {
-            const expireMs = Date.parse(item?.expire_time ?? "")
-            if (!Number.isFinite(expireMs) || expireMs <= nowMs) continue
-            if (expireMs - nowMs > TEMP_CREDIT_WINDOW_MS) continue
-            const balance = Number(item.balance ?? 0)
-            const value = Number(item.value ?? 0)
-            const consumed = Number(item.consumed ?? Math.max(0, value - balance))
-            if (![balance, value, consumed].every(Number.isFinite)) continue
-            expiring.balance += balance
-            expiring.value += value
-            expiring.consumed += consumed
-            if (!expiring.earliest || expireMs < Date.parse(expiring.earliest)) expiring.earliest = String(item.expire_time)
-          }
+          const expiring = summarizeExpiring(bonusItems, nowMs)
 
           const windows = []
           if (expiring.balance > 0) {
@@ -1887,6 +1906,7 @@ export const _internal = {
   resolveBase,
   findBrowser,
   browserCandidates,
+  summarizeExpiring,
   browserLogin,
   safariLogin,
   chromiumLogin,

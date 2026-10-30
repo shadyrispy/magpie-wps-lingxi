@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.7 — 2026-10-31
+
+- 审计修复：
+  - `findBrowser()` 不再每次调用都跑最多 60 次 `reg query`：常见路径优先，全 miss 才查注册表。
+  - 一次性任务重拉后只领取 `type=one_time`，不再可能重复领每日签到。
+  - Cookie 归一保留 `copilot_server_branch`，`X-Cc-Region`（灰度路由）不再永远为空。
+  - `usage.until` 过滤已过期批次；修复 `nowMs` 的 TDZ（额度查询会直接报错）。
+- 新增测试：浏览器发现、任务标志、积分边界（共 30 条，`node --test` 全绿）。
+- 新增 `docs/ONE-TIME-TASKS.md`：交给有未完成任务账号的同学验证「专家/群聊/客户端」三个任务。
+
 ## 0.3.6 — 2026-10-31
 
 - 「导入本机灵犀客户端账号」从 api 类型改成 oauth（`opened: true`）：

@@ -91,8 +91,9 @@ Claude Code、Codex、Cursor 等任何支持 OpenAI 格式的客户端。
 | 一次性任务·专家/客户端 | ⚠️ 尝试 | 纯协议各发一次带标志的最小对话（`session_mode=expert` / `client_type=365wps-lingxi-client`）后重拉任务；是否翻转由服务端判定，插件如实回报，不伪造 |
 | 脚手架 | ✅ | `check.mjs` 30 通过 / 0 警告 / 0 失败；`score.mjs` 身份门通过、自动分 65/65 |
 
-> 未对齐的只有一项：`try_expert_mode` / `use_lingxi_client` 两个一次性任务。需要的话可以加回
-> app-server 内核（Windows、约 90MB 下载）来完成；默认不装。
+> `try_expert_mode` / `use_lingxi_client` 目前是「纯协议尝试」：带标志发一次最小对话后重拉任务，
+> 是否翻转由服务端判定。验证方法见 [`docs/ONE-TIME-TASKS.md`](./docs/ONE-TIME-TASKS.md)
+> （需要账号上这两个任务**还没领过**）。
 
 ### 怎么验一次性任务
 
