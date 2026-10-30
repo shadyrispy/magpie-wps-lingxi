@@ -1,219 +1,31 @@
 // WPS 灵犀 (Lingxi) Provider Plugin for Magpie / OpenCode
-// 借鉴 Magpie 成熟插件体系（Trae / WorkBuddy / OfficeAce）
-// 核心能力：动态同步灵犀网页模型、展示可用智点额度、每日自动签到与全功能 SSE 反代网关
+// 桌面客户端专用：cowork 会话 → credits/run → agent-runtime（安装包 1.3.31 取证）。
+// 同时提供每日签到、智点额度与客户端模型目录；不再使用网页端通路。
 
 import { createServer } from "node:http"
 import { createHash } from "node:crypto"
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
-import { join, dirname } from "node:path"
-import { tmpdir, userInfo } from "node:os"
+import { join } from "node:path"
+import { tmpdir } from "node:os"
 import { exec, spawn } from "node:child_process"
-import { fileURLToPath } from "node:url"
 
 const PROVIDER = "wps-lingxi"
-// 两条平面（别混）：
-//   · 老平面（会话 / cowork）：/api/aigc/v3/assistant/sessions/... 只有 user_input.text，
-//     没有 tools 槽位 —— 只适合纯文本；
-//   · agent-runtime 直连平面：/api/public/v1/agent-runtime/chat/completions，OpenAI 形状，
-//     tools / tool_calls 真可用（2026-10-28 一手实测，见 Agent2Providers feat/lingxi-provider）。
-// 任务 / 余额 / 目录仍在 kdocs.cn；agent-runtime 在 wps.cn 上，先试它、不行再回落老域名。
-const LINGXI_BASE = "https://lingxi.kdocs.cn"
-const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url))
-const AGENT_BASE = "https://lingxi.wps.cn"
+// 只走桌面端（灵犀 1.3.31 安装包）的那一条通路，不再有网页平面：
+//   建会话 POST /api/aioffice/v1/cowork/sessions
+//   领 run POST /api/public/v1/credits/runs
+//   对话   POST /api/public/v1/agent-runtime/chat/completions   (SSE，原生 messages/tools)
+// origin 默认 lingxi.wps.cn（客户端默认域）；kdocs 账号登录后由 probeBase 切到 lingxi.kdocs.cn。
+const BASE = "https://lingxi.wps.cn"
+const KDOCS_BASE = "https://lingxi.kdocs.cn"
 const AGENT_SESSIONS_PATH = "/api/aioffice/v1/cowork/sessions"
 const AGENT_RUNS_PATH = "/api/public/v1/credits/runs"
 const AGENT_CHAT_PATH = "/api/public/v1/agent-runtime/chat/completions"
 const CLIENT_TYPE = "lingxi_claw"
-const APPSERVER_VERSION = "68"
+const CLIENT_LANG = "zh-CN"
 const RUN_TTL_MS = 60 * 60 * 1000
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 const LINGXI_ICON = "data:image/png;base64,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"
 const NPM = "@ai-sdk/openai-compatible"
-
-// 灵犀上游是「聊天应用」而不是函数调用 API：模型把工具调用写在正文里，
-// 用 <|FunctionCallBegin|>[{"name":...,"parameters":{...}}]<|FunctionCallEnd|> 包裹。
-// 网关必须把它翻译成标准 OpenAI tool_calls，否则客户端只会看到一段原文，
-// 并把这一轮当成「没有工具调用 → 正常结束」。
-const TOOL_CALL_BEGIN = "<|FunctionCallBegin|>"
-const TOOL_CALL_END = "<|FunctionCallEnd|>"
-const TOOL_CALL_MAX_BUFFER = 1 << 20
-const TOOL_BRIDGE_ENABLED = process.env.MAGPIE_LINGXI_TOOL_BRIDGE !== "0"
-
-// 对齐灵犀网页端的原生请求字段（从线上 bundle 里还原）：
-//   question / expect_model / thinking / with_mcp / with_expert / user_input
-// thinking 的原生取值是 "auto" | "disabled"；reasoning_effort 才是 0/1/2。
-const THINKING_OVERRIDE = process.env.MAGPIE_LINGXI_THINKING || ""
-const WITH_MCP = process.env.MAGPIE_LINGXI_WITH_MCP === "1"
-
-function thinkingModeFor(effort) {
-  if (THINKING_OVERRIDE === "auto" || THINKING_OVERRIDE === "disabled") return THINKING_OVERRIDE
-  return effort === "0" ? "disabled" : "auto"
-}
-
-function contentToText(content) {
-  if (typeof content === "string") return content
-  if (Array.isArray(content)) {
-    return content.map((part) => {
-      if (typeof part === "string") return part
-      // 上游 completions 只收文本，图片不能静默丢掉，至少留一个可解释的占位
-      if (part?.type === "image" || part?.type === "image_url" || part?.type === "input_image") return "[image]"
-      return part?.text ?? ""
-    }).join("")
-  }
-  if (content == null) return ""
-  return JSON.stringify(content)
-}
-
-// 客户端下发的 tools（OpenAI 格式）→ 紧凑工具表
-function normalizeTools(raw) {
-  if (!Array.isArray(raw)) return []
-  const out = []
-  for (const item of raw) {
-    const fn = item?.type === "function" ? item.function : (item?.function ?? item)
-    if (!fn || typeof fn.name !== "string" || !fn.name.trim()) continue
-    const description = typeof fn.description === "string" ? fn.description : ""
-    out.push({
-      name: fn.name,
-      // 工具清单要随每轮提示词重复下发，描述过长只会白白吃掉上下文
-      description: description.length > 240 ? `${description.slice(0, 240)}…` : description,
-      parameters: fn.parameters ?? { type: "object", properties: {} },
-    })
-  }
-  return out
-}
-
-// 上游只有 question 一个入口，工具清单必须写进提示词，模型才知道该调什么
-function toolProtocolPrompt(tools) {
-  return [
-    "[工具协议 · 内部约定，不要向用户复述]",
-    "你可以调用下列工具。需要调用时，只输出一个标记块，格式严格如下：",
-    `${TOOL_CALL_BEGIN}[{"name":"<工具名>","parameters":{...}}]${TOOL_CALL_END}`,
-    "规则：工具名与参数名必须与下面的 schema 完全一致；parameters 必须是 JSON 对象；",
-    "一次可以调用多个工具（数组里放多个对象）；标记块之后不要再输出解释，等待工具结果。",
-    "可用工具：",
-    JSON.stringify(tools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }))),
-  ].join("\n")
-}
-
-// 把历史里的 assistant tool_calls 还原成上游认识的信封，供多轮工具循环使用
-function nativeCallBlock(toolCalls) {
-  if (!Array.isArray(toolCalls) || !toolCalls.length) return ""
-  const entries = []
-  for (const call of toolCalls) {
-    const fn = call?.function ?? call ?? {}
-    let parameters = {}
-    if (typeof fn.arguments === "string") {
-      try { parameters = JSON.parse(fn.arguments) } catch { parameters = { raw: fn.arguments } }
-    } else if (fn.arguments && typeof fn.arguments === "object") {
-      parameters = fn.arguments
-    }
-    if (fn.name) entries.push({ name: fn.name, parameters })
-  }
-  if (!entries.length) return ""
-  return `${TOOL_CALL_BEGIN}${JSON.stringify(entries)}${TOOL_CALL_END}`
-}
-
-// 只接受「结构合法 + 工具名在本次请求清单内」的载荷，避免模型讨论这个格式时被误触发
-function parseNativeToolCalls(payload, allowed) {
-  let parsed
-  try { parsed = JSON.parse(payload) } catch { return null }
-  const list = Array.isArray(parsed) ? parsed : [parsed]
-  if (!list.length || !allowed.size) return null
-  const calls = []
-  for (const entry of list) {
-    if (!entry || typeof entry !== "object") return null
-    const name = entry.name ?? entry.tool ?? entry.function?.name
-    const params = entry.parameters ?? entry.arguments ?? entry.function?.arguments
-    if (typeof name !== "string" || !allowed.has(name)) return null
-    let args
-    if (typeof params === "string") {
-      try { JSON.parse(params) } catch { return null }
-      args = params
-    } else if (params && typeof params === "object" && !Array.isArray(params)) {
-      args = JSON.stringify(params)
-    } else {
-      return null
-    }
-    calls.push({ name, arguments: args })
-  }
-  return calls
-}
-
-// 最长「可能是标记前缀」的后缀长度，流式时先扣住不吐，避免标记被切断后漏到正文
-function partialMarkerLength(text, marker) {
-  const max = Math.min(text.length, marker.length - 1)
-  for (let n = max; n > 0; n--) {
-    if (text.endsWith(marker.slice(0, n))) return n
-  }
-  return 0
-}
-
-function createToolCallParser(allowedNames) {
-  const allowed = allowedNames instanceof Set ? allowedNames : new Set(allowedNames || [])
-  let buffer = ""
-  let inCall = false
-
-  function drain(out, final) {
-    for (;;) {
-      if (!inCall) {
-        const at = buffer.indexOf(TOOL_CALL_BEGIN)
-        if (at >= 0) {
-          if (at > 0) out.push({ type: "text", value: buffer.slice(0, at) })
-          buffer = buffer.slice(at + TOOL_CALL_BEGIN.length)
-          inCall = true
-          continue
-        }
-        const hold = final ? 0 : partialMarkerLength(buffer, TOOL_CALL_BEGIN)
-        const cut = buffer.length - hold
-        if (cut > 0) {
-          out.push({ type: "text", value: buffer.slice(0, cut) })
-          buffer = buffer.slice(cut)
-        }
-        return
-      }
-      const at = buffer.indexOf(TOOL_CALL_END)
-      if (at >= 0) {
-        const payload = buffer.slice(0, at)
-        buffer = buffer.slice(at + TOOL_CALL_END.length)
-        inCall = false
-        const calls = parseNativeToolCalls(payload, allowed)
-        if (calls) out.push({ type: "calls", calls })
-        else if (payload) out.push({ type: "text", value: TOOL_CALL_BEGIN + payload + TOOL_CALL_END })
-        continue
-      }
-      if (buffer.length > TOOL_CALL_MAX_BUFFER) {
-        out.push({ type: "text", value: TOOL_CALL_BEGIN + buffer })
-        buffer = ""
-        inCall = false
-        return
-      }
-      return
-    }
-  }
-
-  return {
-    push(chunk) {
-      const out = []
-      buffer += chunk
-      drain(out, false)
-      return out
-    },
-    flush() {
-      const out = []
-      drain(out, true)
-      if (inCall) {
-        const calls = parseNativeToolCalls(buffer, allowed)
-        if (calls) out.push({ type: "calls", calls })
-        else if (buffer) out.push({ type: "text", value: TOOL_CALL_BEGIN + buffer })
-      } else if (buffer) {
-        out.push({ type: "text", value: buffer })
-      }
-      buffer = ""
-      inCall = false
-      return out
-    },
-  }
-}
 
 // 灵犀官方模型表（与网页端 1:1 保持一致）
 const DEFAULT_MODELS = [
@@ -232,276 +44,6 @@ const DEFAULT_MODELS = [
   { id: "plan_pro", name: "Pro 模式 (深度推理)", context: 1048576, multiplier: "1.0x", reasoning: true, vision: false },
   { id: "plan_max", name: "Max 模式 (复杂任务)", context: 1048576, multiplier: "1.0x", reasoning: true, vision: false },
 ]
-
-// ── 原生 Agent Runtime（灵犀桌面端同款通路）────────────────────────────────
-// 网页聊天接口只收一个 question 字符串；桌面客户端用的是 cowork 的 Agent Runtime：
-// 收原生 messages / tools，吐原生 tool_calls / reasoning_content / usage。
-// 这里按「原生优先、网页兜底」路由：模型在原生目录里就走原生，否则回落到 0.1.x 的网页通路。
-const NATIVE_BASE = "https://cowork.wps.cn"
-const NATIVE_MODE = (process.env.MAGPIE_LINGXI_MODE || "auto").toLowerCase() // auto | native | legacy
-
-/** 原生模型目录：key -> { key, name, desc }；由 provider.models() 填充 */
-const nativeCatalog = new Map()
-
-function nativeHeaders(cookie, extra = {}) {
-  return {
-    Cookie: cookie,
-    "Content-Type": "application/json",
-    "X-Client-Type": "wps_separate",
-    "X-Cc-Agent-Type": "lingxi_claw",
-    ...extra,
-  }
-}
-
-async function fetchNativeCatalog(cookie, signal) {
-  const res = await fetch(`${NATIVE_BASE}/api/aioffice/v1/sessions/plans`, {
-    headers: { Cookie: cookie, "X-Client-Type": "wps_separate" },
-    signal,
-  })
-  if (!res.ok) throw new Error(`native catalog: HTTP ${res.status}`)
-  const json = await res.json()
-  const data = json?.data || {}
-  const list = []
-  for (const m of data.models || []) {
-    if (m?.key) list.push({ key: m.key, name: m.name || m.key, desc: m.desc || "" })
-  }
-  for (const p of data.plans || []) {
-    if (p?.key) list.push({ key: p.key, name: p.name || p.key, desc: p.desc || "" })
-  }
-  if (!list.length) throw new Error("native catalog is empty")
-  nativeCatalog.clear()
-  for (const m of list) nativeCatalog.set(m.key, m)
-  return list
-}
-
-// 原生接口的推理档位是 low/high/max；网页通路是 0/1/2，两边都要认
-const NATIVE_EFFORT = { low: "low", high: "high", max: "max", "0": "low", "1": "high", "2": "max" }
-
-function splitSystemMessages(messages) {
-  const system = []
-  const rest = []
-  for (const m of messages) {
-    const role = m?.role
-    if (role === "system" || role === "developer") {
-      const text = contentToText(m.content).trim()
-      if (text && !system.includes(text)) system.push(text)
-      continue
-    }
-    rest.push(m)
-  }
-  return { context: system.join("\n\n"), messages: rest }
-}
-
-function toNativeMessages(messages) {
-  const out = []
-  for (const m of messages) {
-    const role = m?.role
-    if (role === "assistant") {
-      const entry = { role: "assistant", content: contentToText(m.content) }
-      if (Array.isArray(m.tool_calls) && m.tool_calls.length) entry.tool_calls = m.tool_calls
-      if (typeof m.reasoning_content === "string" && m.reasoning_content) entry.reasoning_content = m.reasoning_content
-      out.push(entry)
-    } else if (role === "tool" || role === "function") {
-      out.push({ role: "tool", tool_call_id: m.tool_call_id || m.id || "", content: contentToText(m.content) })
-    } else if (role === "user") {
-      out.push({ role: "user", content: contentToText(m.content) })
-    }
-  }
-  return out
-}
-
-function nativePayload(body, modelKey) {
-  const { context, messages } = splitSystemMessages(body.messages || [])
-  const args = {}
-  if (Number.isFinite(body.max_tokens)) args.max_tokens = body.max_tokens
-  if (Number.isFinite(body.temperature)) args.temperature = body.temperature
-  if (Number.isFinite(body.top_p)) args.top_p = body.top_p
-  if (Array.isArray(body.stop)) args.stop = body.stop
-
-  const payload = {
-    stream: body.stream !== false,
-    model: modelKey,
-    messages: toNativeMessages(messages),
-    base_llm_arguments: args,
-    sec_text: { from: "AI_WPS_SMARTASSISTANT", scene: "soul_claw" },
-  }
-  if (context) payload.context = context
-  if (Array.isArray(body.tools) && body.tools.length) payload.tools = body.tools
-  if (body.tool_choice) payload.tool_choice = body.tool_choice
-  const effort = NATIVE_EFFORT[String(body.reasoning_effort ?? body.reasoningEffort ?? "").toLowerCase()]
-  if (effort) payload.reasoning_effort = effort
-  return payload
-}
-
-function jsonResponse(value, status = 200) {
-  return new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } })
-}
-
-// 原生通路：① credits/runs 领 run_id → ② agent-runtime/chat/completions → ③ 转成 OpenAI 形状
-async function nativeCompletion({ body, cookie, signal, modelKey }) {
-  const stream = body.stream !== false
-  const payload = nativePayload(body, modelKey)
-  // 每请求一个独立 session：实测同 session 并发 8 路也正常（无互斥、无串扰），
-  // 独立 session 只是为了不依赖任何服务端会话状态，代价为零。
-  const sessionId = String(Date.now()) + String(Math.floor(Math.random() * 100)).padStart(2, "0")
-
-  let runRes
-  try {
-    runRes = await fetch(`${NATIVE_BASE}/api/public/v1/credits/runs`, {
-      method: "POST",
-      signal,
-      headers: nativeHeaders(cookie, { "X-Cc-Session-ID": sessionId }),
-      body: JSON.stringify({
-        client_type: "wps_separate",
-        client_request_id: String(Date.now()),
-        session_id: sessionId,
-        model_provider: "lingxi",
-        model_id: modelKey,
-      }),
-    })
-  } catch (error) {
-    signal?.throwIfAborted()
-    return jsonResponse({ error: { message: `WPS 灵犀计费 run 请求失败: ${error.message}`, type: "upstream_error" } }, 502)
-  }
-  if (!runRes.ok) {
-    const text = await runRes.text().catch(() => "")
-    return jsonResponse({
-      error: { message: `WPS 灵犀计费 run 被拒: HTTP ${runRes.status} ${text.slice(0, 200)}`, type: "upstream_error" },
-    }, runRes.status)
-  }
-  const runJson = await runRes.json().catch(() => ({}))
-  const runId = runJson?.data?.run_id
-  if (!runId) {
-    return jsonResponse({ error: { message: "WPS 灵犀未返回 run_id", type: "upstream_error" } }, 502)
-  }
-
-  let chatRes
-  try {
-    chatRes = await fetch(`${NATIVE_BASE}/api/public/v1/agent-runtime/chat/completions`, {
-      method: "POST",
-      signal,
-      headers: nativeHeaders(cookie, {
-        Accept: "text/event-stream",
-        "X-Cc-Session-ID": sessionId,
-        "X-Cc-Run-ID": String(runId),
-        "AI-Gateway-Product-Name": "wps-public-pc",
-        "AI-Gateway-Intention-Code": "wps_public_home_agentconversation",
-        "X-Client-Lang": "zh-CN",
-        "X-Request-Id": cryptoRandomId(),
-      }),
-      body: JSON.stringify(payload),
-    })
-  } catch (error) {
-    signal?.throwIfAborted()
-    return jsonResponse({ error: { message: `WPS 灵犀原生接口不可达: ${error.message}`, type: "upstream_error" } }, 502)
-  }
-  if (!chatRes.ok) {
-    const text = await chatRes.text().catch(() => "")
-    return jsonResponse({
-      error: { message: `WPS 灵犀原生接口异常: HTTP ${chatRes.status} ${text.slice(0, 200)}`, type: "upstream_error" },
-    }, chatRes.status)
-  }
-
-  if (!stream) {
-    const json = await chatRes.json().catch(() => null)
-    const choice = json?.choices?.[0] || {}
-    const message = { role: "assistant", content: choice.text || null }
-    if (choice.reasoning_content) message.reasoning_content = choice.reasoning_content
-    if (Array.isArray(choice.tool_calls) && choice.tool_calls.length) message.tool_calls = choice.tool_calls
-    return jsonResponse({
-      id: `chatcmpl-${Date.now()}`,
-      object: "chat.completion",
-      created: Math.floor(Date.now() / 1000),
-      model: modelKey,
-      choices: [{ index: 0, message, finish_reason: choice.finish_reason || "stop" }],
-      ...(json?.usage ? { usage: normalizeUsage(json.usage) } : {}),
-    })
-  }
-
-  const encoder = new TextEncoder()
-  const decoder = new TextDecoder()
-  const completionId = `chatcmpl-${Date.now()}`
-  let buffer = ""
-  let done = false
-
-  const emit = (controller, delta, finishReason = null, usage) => {
-    const value = {
-      id: completionId,
-      object: "chat.completion.chunk",
-      created: Math.floor(Date.now() / 1000),
-      model: modelKey,
-      choices: [{ delta, index: 0, finish_reason: finishReason }],
-    }
-    if (usage) value.usage = usage
-    controller.enqueue(encoder.encode(`data: ${JSON.stringify(value)}\n\n`))
-  }
-
-  const handle = (controller, line) => {
-    if (!line.startsWith("data:")) return
-    const raw = line.slice(5).trim()
-    if (!raw || raw === "[DONE]") return
-    let item
-    try { item = JSON.parse(raw) } catch { return }
-    if (item.code && item.code !== "Success") {
-      controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: { message: item.message || item.code, type: "upstream_error", code: item.code } })}\n\n`))
-      done = true
-      return
-    }
-    const choice = item.choices?.[0] || {}
-    if (choice.reasoning_content) emit(controller, { reasoning_content: choice.reasoning_content })
-    if (choice.text) emit(controller, { content: choice.text })
-    if (Array.isArray(choice.tool_calls) && choice.tool_calls.length) {
-      emit(controller, { tool_calls: choice.tool_calls })
-    }
-    if (choice.finish_reason) {
-      done = true
-      emit(controller, {}, choice.finish_reason, item.usage ? normalizeUsage(item.usage) : undefined)
-    }
-  }
-
-  const transform = new TransformStream({
-    transform(chunk, controller) {
-      buffer += decoder.decode(chunk, { stream: true })
-      let index
-      while ((index = buffer.indexOf("\n")) >= 0) {
-        const line = buffer.slice(0, index).replace(/\r$/, "")
-        buffer = buffer.slice(index + 1)
-        if (line.trim()) handle(controller, line)
-      }
-    },
-    flush(controller) {
-      const tail = (buffer + decoder.decode()).trim()
-      if (tail) handle(controller, tail)
-      if (!done) emit(controller, {}, "stop")
-      controller.enqueue(encoder.encode("data: [DONE]\n\n"))
-    },
-  })
-
-  return new Response(chatRes.body.pipeThrough(transform), {
-    headers: {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive",
-    },
-  })
-}
-
-function normalizeUsage(usage) {
-  return {
-    prompt_tokens: Number(usage.prompt_tokens || 0),
-    completion_tokens: Number(usage.completion_tokens || 0),
-    total_tokens: Number(usage.total_tokens || 0),
-    ...(usage.cached_tokens ? { prompt_tokens_details: { cached_tokens: Number(usage.cached_tokens) } } : {}),
-  }
-}
-
-function cryptoRandomId() {
-  try {
-    return globalThis.crypto.randomUUID()
-  } catch {
-    return `${Date.now()}-${Math.random().toString(16).slice(2)}`
-  }
-}
 
 // variantsOf is a model's variants as OpenCode and magpie read them: an object
 // with one key per level, not an array. magpie's plugin host takes
@@ -532,7 +74,7 @@ function modelOf(provider, m) {
     id: m.id || m.key,
     providerID: provider.id,
     name: `${m.name}${multiplierText}`,
-    api: { id: m.id || m.key, url: `${LINGXI_BASE}/api`, npm: NPM },
+    api: { id: m.id || m.key, url: `${BASE}/api`, npm: NPM },
     status: "active",
     headers: {},
     options: {},
@@ -552,6 +94,15 @@ function modelOf(provider, m) {
   }
 }
 
+// 上游时间是 "YYYY-MM-DD HH:mm:ss"（北京时区）；magpie 只认严格 ISO。
+function toIso(value) {
+  const text = String(value ?? "").trim()
+  if (!text) return ""
+  if (/^\d{4}-\d{2}-\d{2}T/.test(text)) return text
+  const m = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2})?)$/.exec(text)
+  return m ? `${m[1]}T${m[2]}${m[2].length === 5 ? ":00" : ""}+08:00` : text
+}
+
 function getTodayString() {
   const d = new Date()
   const year = d.getFullYear()
@@ -564,7 +115,7 @@ function getTodayString() {
 // `Cookie: wps_sid=…; uid=…`，或 DevTools 里复制的一整行。统一归一成
 // `wps_sid=…; uid=…`，并按 uid（没有就按 sid 尾部）区分账号 —— 固定
 // accountId 会让第二个账号覆盖第一个。
-export function parseCookieInput(raw) {
+function parseCookieInput(raw) {
   let text = String(raw ?? "").trim()
   if (!text) return null
   text = text.replace(/^cookie:\s*/i, "").replace(/^["']|["']$/g, "").trim()
@@ -627,32 +178,27 @@ const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (char) => (
   { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]
 ))
 
+// 账号的会话凭据统一从 parseCookieInput 归一：保留 wps_sid 与 uid（多账号靠 uid 区分），
+// 其余键（kso_sid / rtk / lang…）不需要，也不该发给上游。
 function resolveCookie(auth) {
   if (!auth) return ""
-  const fromMeta = typeof auth.metadata?.sid === "string" ? auth.metadata.sid.trim() : ""
-  if (fromMeta) return `wps_sid=${fromMeta}`
-  for (const raw of [auth.cookie, auth.metadata?.cookie, auth.key, auth.access]) {
-    const sid = extractSid(raw)
-    if (sid) return `wps_sid=${sid}`
-  }
-  return ""
+  const cred = parseCookieInput(
+    auth.metadata?.cookie || auth.cookie || auth.key || auth.access || auth.metadata?.sid || ""
+  )
+  return cred ? cred.cookie : ""
 }
 
 function normalizeCredential(raw) {
-  const text = String(raw ?? "").trim()
-  if (!text) return { error: "请输入 wps_sid 或整段 Cookie" }
-  const sid = extractSid(text)
-  if (!sid) return { error: "没有在输入里找到 wps_sid（可粘贴整段 Cookie 或 wps_sid 的值）" }
-  if (sid.length < 16) return { error: "wps_sid 太短，像是不完整的粘贴" }
-  const uid = extractUid(text)
-  const identity = identityOf(sid)
+  const cred = parseCookieInput(raw)
+  if (!cred) return { error: "没有在输入里找到 wps_sid（可粘贴整段 Cookie 或 wps_sid 的值）" }
+  if (cred.sid.length < 16) return { error: "wps_sid 太短，像是不完整的粘贴" }
   return {
-    sid,
-    uid,
-    identity,
-    cookie: `wps_sid=${sid}`,
-    accountId: `灵犀·${identity.slice(0, 8)}`,
-    tail: cookieTail(sid),
+    sid: cred.sid,
+    uid: cred.uid,
+    identity: identityOf(cred.sid),
+    cookie: cred.cookie,
+    accountId: cred.accountId,
+    tail: cookieTail(cred.sid),
   }
 }
 
@@ -674,24 +220,24 @@ function envelopeError(payload) {
   return ""
 }
 
-function basicHeaders(cookie, base = LINGXI_BASE) {
+function basicHeaders(cookie, base = BASE) {
   return { Cookie: cookie, "User-Agent": UA, Referer: `${base}/`, Accept: "application/json" }
 }
 
 function resolveBase(auth) {
   const host = typeof auth?.metadata?.host === "string" ? auth.metadata.host.trim() : ""
-  return host || LINGXI_BASE
+  return host || BASE
 }
 
 // 登录后探测哪个域名接受这把 Cookie（wps.cn / kdocs.cn 是同一账号的两套站）。
 async function probeBase(cookie) {
-  for (const base of [AGENT_BASE, LINGXI_BASE]) {
+  for (const base of [BASE, KDOCS_BASE]) {
     try {
       const response = await fetch(`${base}/api/public/v1/credits/balance`, { headers: basicHeaders(cookie, base) })
       if (response.ok) return base
     } catch {}
   }
-  return AGENT_BASE
+  return BASE
 }
 
 // ── 浏览器自动登录（Chrome/Edge CDP 抓 wps_sid）────────────────────────
@@ -946,16 +492,31 @@ async function browserLogin({ url, timeoutMs = 5 * 60 * 1000, signal }) {
   throw new Error("没有找到 Chrome / Edge / Chromium；Safari 的自动化窗口不允许手动输入，请用下方手动粘贴 Cookie，或安装 Chrome/Edge")
 }
 
+// 与客户端 app-server 发出的请求头一致（安装包 1.3.31 取证）：
+// X-Client-Type / X-Client-Lang / X-Cc-Agent-Type + 每个 run 的 X-Cc-Session-ID / X-Cc-Run-ID。
+// X-Cc-Region 只在账号登录时从 Cookie 里带了 copilot_server_branch 才加。
 function agentHeaders(cookie, base, extra = {}) {
+  const region = cookieRegion(cookie)
   return {
     Cookie: cookie,
     "Content-Type": "application/json",
-    "x-client-type": CLIENT_TYPE,
-    "x-lingxi-appserver-version": APPSERVER_VERSION,
+    "X-Client-Type": CLIENT_TYPE,
+    "X-Client-Lang": CLIENT_LANG,
+    "X-Cc-Agent-Type": CLIENT_TYPE,
+    ...(region ? { "X-Cc-Region": region } : {}),
     Referer: `${base}/`,
     "User-Agent": UA,
     ...extra,
   }
+}
+
+// 灰度区域：客户端从 cookie `copilot_server_branch` 读取，跟着 query/头一起发。
+function cookieRegion(cookie) {
+  for (const part of String(cookie ?? "").split(";")) {
+    const item = part.trim()
+    if (item.startsWith("copilot_server_branch=")) return item.slice("copilot_server_branch=".length)
+  }
+  return ""
 }
 
 function wireModel(value) {
@@ -1070,7 +631,7 @@ async function ensureRun(cookie, key, model, title, signal) {
   if (hit && Date.now() - hit.at < RUN_TTL_MS) return hit
   let lastError
   // 先试 wps.cn（reference 实测的平面），404/401 再回落登录用的 kdocs 域名。
-  for (const base of [AGENT_BASE, LINGXI_BASE]) {
+  for (const base of [BASE, BASE]) {
     try {
       const sessionId = await createCoworkSession(base, cookie, signal)
       const runId = await createCreditsRun(base, cookie, sessionId, model, title, signal)
@@ -1273,6 +834,18 @@ async function requestAgent(cookie, run, payload, signal) {
   return response
 }
 
+// magpie 用状态码区分「模型级错误」和「登录失效」：模型/参数问题必须是 404，
+// 只有明确的鉴权失败才给 401（否则会把账号标成未登录、从路由里摘掉）。
+function chatErrorStatus(error) {
+  const status = Number(error?.status) || 0
+  const text = String(error?.message || "")
+  if (status === 401 || status === 403) {
+    return /unauthor|登录|凭据|credential|cookie|sid/i.test(text) ? 401 : 404
+  }
+  if (status === 400 || status === 404 || status === 422) return 404
+  return status >= 500 ? status : 502
+}
+
 async function agentChat({ cookie, body, stream, requestedModel, signal, errorResponse }) {
   const key = `${identityOf(cookie)}|${requestedModel}`
   const payload = buildAgentBody(body, requestedModel)
@@ -1346,7 +919,7 @@ async function agentChat({ cookie, body, stream, requestedModel, signal, errorRe
 
 // ── 余额与任务领取（签到用）────────────────────────────────────────────
 
-async function balanceTotal(cookie, base = LINGXI_BASE) {
+async function balanceTotal(cookie, base = BASE) {
   try {
     const response = await fetch(`${base}/api/public/v1/credits/balance`, { headers: basicHeaders(cookie, base) })
     if (!response.ok) return null
@@ -1382,358 +955,16 @@ async function claimTask(cookie, base, key, date) {
 }
 
 // 领取日期优先取任务里「今天可领」那一档（+08 口径由上游给，别自己算）。
-// ── 灵犀任务中心：把「做不出来」的一次性任务做出来 ──────────────────────────
+// ── 灵犀任务中心：一次性任务 ──────────────────────────────────────────
 //
-// 任务中心除了每日签到，还有三个一次性任务：
+// 任务中心除每日签到外还有三个一次性任务：
 //   try_expert_mode    「完整体验一次灵犀专家模式」  200 智点
 //   try_group_chat     「体验一次群聊功能」            400 智点
 //   use_lingxi_client  「使用灵犀客户端」              800 智点
 //
-// 上游已有的「只领上游 claimable 的」逻辑只能领回**已经完成**的任务；
-// 而这三个任务需要**先去做**。服务端判定「专家模式 / 客户端」靠的不是某个
-// 请求头，而是**经 AI Gateway 发出的那一次真实客户端对话**这一信号 ——
-// 纯 HTTP 模拟（agent-runtime 平面、老平面 aigc v3、各种 cowork 会话）
-// 实测都无法让任务状态翻转。
-//
-// 所以这里复用客户端自己的内核 app-server：以 stdio JSON-RPC 把它拉起来，
-// 发一次最小对话（"hi"），行为与真客户端完全一致；随后复用该会话建群。
-//
-// app-server 由官方 CDN 公开分发，插件按需自动下载并校验 sha256：
-//   node scripts/fetch-app-server.mjs
-// （仓库里不放任何二进制，vendor/ 已 gitignore）
-//
-// 协议（客户端 app-server:transport 日志逆向）：
-//   initialize → initialized(notify) → account/login/start
-//   → session/start → run/start → (run.end / stream.end)
-//
-// ⚠️ 两个实测踩过的坑：
-//   1) 建群要求会话 execution_status=completed，而这个状态是服务端在
-//      app-server **进程存活期间**落的 —— 进程提前退出会让会话永远停在
-//      running，建群接口恒返回 400。所以 stop() 要等建群做完再调用。
-//   2) 拿到 run.end 之后还要轮询会话详情，等状态真正落库。
-
-const APP_SERVER_DIR = join(PLUGIN_DIR, "vendor", "app-server")
-const APP_SERVER_EXE = join(APP_SERVER_DIR, "service", "lingxi.exe")
-const APP_SERVER_PROTOCOL = "2026-08-13"
-const APP_SERVER_CLIENT_NAME = "wps-lingxi-desktop"
-// 最低倍率模型（一次 "hi" 约 1 智点）
-const APP_SERVER_MODEL = "qwen3.8_flash"
-const APP_SERVER_VERSIONS_API = "https://lingxi.kdocs.cn/api/aioffice/v1/cowork/app-server/versions"
-const APP_SERVER_TIMEOUT_MS = 90000
-
-function appServerAvailable() {
-  return process.platform === "win32" && existsSync(APP_SERVER_EXE)
-}
-
-/**
- * 首次需要时自动下载官方 app-server（公开 CDN，无需鉴权）。
- * 失败不抛异常 —— 只是让「客户端类任务」跳过，其余功能照常。
- */
-let appServerFetchPromise = null
-async function ensureAppServer() {
-  // app-server 只提供 Windows 平台产物，其他平台直接跳过（不去白下载 90MB）
-  if (process.platform !== "win32") return false
-  if (appServerAvailable()) return true
-  if (appServerFetchPromise) {
-    try {
-      return await appServerFetchPromise
-    } catch {
-      return false
-    }
-  }
-  appServerFetchPromise = (async () => {
-    try {
-      const res = await fetch(APP_SERVER_VERSIONS_API, {
-        headers: { Accept: "application/json" },
-        signal: AbortSignal.timeout(30000),
-      })
-      if (!res.ok) return false
-      const json = await res.json().catch(() => ({}))
-      const win = json?.data?.app_server?.platforms?.win
-      if (!win?.download_url) return false
-
-      const { mkdirSync, createWriteStream, statSync, rmSync, renameSync, readFileSync, readdirSync, copyFileSync } = await import("node:fs")
-      const { createHash } = await import("node:crypto")
-      const { Readable } = await import("node:stream")
-      const { pipeline } = await import("node:stream/promises")
-
-      mkdirSync(APP_SERVER_DIR, { recursive: true })
-      const zipPath = join(APP_SERVER_DIR, "app-server.zip")
-      const dl = await fetch(win.download_url, { signal: AbortSignal.timeout(600000) })
-      if (!dl.ok) return false
-      await pipeline(Readable.fromWeb(dl.body), createWriteStream(zipPath + ".part"))
-      if (win.hash) {
-        const got = createHash("sha256").update(readFileSync(zipPath + ".part")).digest("hex")
-        if (got !== win.hash) {
-          rmSync(zipPath + ".part", { force: true })
-          return false
-        }
-      }
-      renameSync(zipPath + ".part", zipPath)
-
-      // 解压：优先用系统 tar（Win10+ 自带 bsdtar），否则 7z / unzip
-      const extractDir = join(APP_SERVER_DIR, "_extract")
-      rmSync(extractDir, { recursive: true, force: true })
-      mkdirSync(extractDir, { recursive: true })
-      const { spawn } = await import("node:child_process")
-      const candidates = [
-        { cmd: "tar", args: ["-xf", zipPath, "-C", extractDir] },
-        { cmd: "7z", args: ["x", `-o${extractDir}`, "-y", zipPath] },
-        { cmd: "7za", args: ["x", `-o${extractDir}`, "-y", zipPath] },
-        { cmd: "unzip", args: ["-q", zipPath, "-d", extractDir] },
-      ]
-      let unzipped = false
-      for (const c of candidates) {
-        unzipped = await new Promise((res) => {
-          const p = spawn(c.cmd, c.args, { stdio: "ignore", shell: process.platform === "win32" })
-          p.on("error", () => res(false))
-          p.on("exit", (code) => res(code === 0))
-        })
-        if (unzipped) break
-      }
-      rmSync(zipPath, { force: true })
-      if (!unzipped) {
-        rmSync(extractDir, { recursive: true, force: true })
-        return false
-      }
-
-      // zip 内可能是 app-server/service/lingxi.exe，也可能是 service/lingxi.exe
-      let src = join(extractDir, "app-server", "service", "lingxi.exe")
-      if (!existsSync(src)) {
-        const found = readdirSync(extractDir)
-          .map((d) => join(extractDir, d, "service", "lingxi.exe"))
-          .find((p) => existsSync(p))
-        if (!found) {
-          rmSync(extractDir, { recursive: true, force: true })
-          return false
-        }
-        src = found
-      }
-      const destDir = join(APP_SERVER_DIR, "service")
-      mkdirSync(destDir, { recursive: true })
-      copyFileSync(src, join(destDir, "lingxi.exe"))
-      rmSync(extractDir, { recursive: true, force: true })
-      return statSync(join(destDir, "lingxi.exe")).size > 0
-    } catch {
-      return false
-    }
-  })()
-  return appServerFetchPromise
-}
-
-/**
- * 驱动 app-server 跑一次对话。
- * 返回 { ok, sessionId, error, stop } —— stop() 必须在建群完成后调用。
- */
-async function runAppServerChat(cookie, base) {
-  const sid = extractSid(cookie)
-  if (!sid) return { ok: false, sessionId: "", error: "无 wps_sid" }
-  if (!(await ensureAppServer())) {
-    return { ok: false, sessionId: "", error: "app-server 不可用" }
-  }
-
-  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs")
-
-  let dataDir = ""
-  let proc = null
-  const cleanup = () => {
-    try { proc?.kill() } catch {}
-    if (dataDir) { try { rmSync(dataDir, { recursive: true, force: true }) } catch {} }
-  }
-
-  try {
-    dataDir = mkdtempSync(join(tmpdir(), "magpie-lingxi-as-"))
-    const authPath = join(dataDir, "auth.json")
-    writeFileSync(authPath, JSON.stringify({ auth_mode: "wps_sid", wps_sid: { value: sid } }))
-
-    proc = spawn(
-      APP_SERVER_EXE,
-      ["-stdin", "-auth-file", authPath, "-data-dir", dataDir, "-client-type", "lingxi_claw"],
-      { stdio: ["pipe", "pipe", "pipe"], windowsHide: true },
-    )
-
-    // ── JSON-RPC over stdio ──
-    let buf = ""
-    const waiters = new Map()
-    let resolveEnd = null
-    const endPromise = new Promise((r) => { resolveEnd = r })
-
-    proc.stdout.setEncoding("utf8")
-    proc.stdout.on("data", (chunk) => {
-      buf += chunk
-      let i
-      while ((i = buf.indexOf("\n")) >= 0) {
-        const line = buf.slice(0, i).trim()
-        buf = buf.slice(i + 1)
-        if (!line) continue
-        let msg
-        try { msg = JSON.parse(line) } catch { continue }
-        if (msg.id && waiters.has(msg.id)) {
-          waiters.get(msg.id)(msg)
-          waiters.delete(msg.id)
-        } else if (msg.method === "run.end" || msg.method === "stream.end") {
-          resolveEnd?.()
-        }
-      }
-    })
-    proc.stderr.resume()
-
-    let seq = 0
-    const rpc = (method, params, timeoutMs = 60000) =>
-      new Promise((resolve, reject) => {
-        const id = "s:magpie_" + ++seq
-        const timer = setTimeout(() => {
-          if (waiters.has(id)) { waiters.delete(id); reject(new Error(method + " 超时")) }
-        }, timeoutMs)
-        waiters.set(id, (m) => { clearTimeout(timer); resolve(m) })
-        try {
-          proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n")
-        } catch (e) {
-          clearTimeout(timer)
-          waiters.delete(id)
-          reject(e)
-        }
-      })
-    const notify = (method, params) => {
-      try { proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", method, params }) + "\n") } catch {}
-    }
-
-    const deviceId = await appServerDeviceId()
-
-    // ① initialize
-    const init = await rpc("initialize", {
-      protocol_version: APP_SERVER_PROTOCOL,
-      client_info: { name: APP_SERVER_CLIENT_NAME, version: "1.3.31" },
-      capabilities: { bash_approval: false, skill_management: false, timer_task: true, auth_refresh: true },
-      device_id: deviceId,
-      device_name: appServerDeviceName(),
-    })
-    if (init?.error) { cleanup(); return { ok: false, sessionId: "", error: "initialize 失败" } }
-    notify("initialized", {})
-
-    // ② account/login/start（冲突 = 已登录，可忽略）
-    try { await rpc("account/login/start", { auth_mode: "wps_sid", wps_sid: sid }, 30000) } catch {}
-
-    // ③ session/start
-    const sess = await rpc("session/start", {
-      client_type: "lingxi_claw",
-      session_type: "cowork_client",
-      workspace_dir: "magpie-lingxi",
-      official_skills_dir: "official_skills",
-      user_skills_dir: "user_skills",
-      target_skills_dir: "target_skills",
-      env: {
-        device_id: deviceId,
-        device_name: appServerDeviceName(),
-        skills: { dir: "target_skills", list: [] },
-      },
-    })
-    const sessionId = String(sess?.result?.session_id ?? "")
-    if (!sessionId) { cleanup(); return { ok: false, sessionId: "", error: "session/start 失败" } }
-
-    // ④ run/start —— 发一句最短的 "hi"
-    await rpc("run/start", {
-      session_id: sessionId,
-      agent_input: {
-        text: "hi",
-        files: [],
-        file_ids: [],
-        expect_model: APP_SERVER_MODEL,
-        refs: [],
-        webpage_edit_selections: [],
-        permission_mode: "default",
-        reasoning_effort: "low",
-        current_mode: "agent",
-        browser_plugin_enabled: false,
-      },
-      model: { provider: "lingxi", model_name: APP_SERVER_MODEL },
-    }, APP_SERVER_TIMEOUT_MS)
-
-    // ⑤ 等对话结束
-    await Promise.race([endPromise, new Promise((r) => setTimeout(r, APP_SERVER_TIMEOUT_MS))])
-
-    // ⑥ 等服务端落库 execution_status=completed（此时进程必须还活着）
-    const done = await waitSessionCompleted(sessionId, cookie, base)
-    if (!done) {
-      cleanup()
-      return { ok: false, sessionId, error: "会话未完成" }
-    }
-
-    // 注意：这里**不能**立刻结束进程。execution_status=completed 是服务端在
-    // app-server 存活期间落的，进程提前死 → 会话永远停在 running → 建群恒 400。
-    return { ok: true, sessionId, error: "", stop: cleanup }
-  } catch (error) {
-    cleanup()
-    return { ok: false, sessionId: "", error: String(error?.message || error).slice(0, 120) }
-  }
-}
-
-/** 轮询会话详情，直到 execution_status 变成 completed（建群接口的硬性前提） */
-async function waitSessionCompleted(sessionId, cookie, base, timeoutMs = 60000) {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(`${base}/api/public/v1/sessions/${sessionId}`, {
-        headers: basicHeaders(cookie, base),
-        signal: AbortSignal.timeout(15000),
-      })
-      if (response.ok) {
-        const payload = await response.json().catch(() => ({}))
-        if (payload?.data?.execution_status === "completed" || payload?.data?.terminal_status === "completed") return true
-      }
-    } catch {}
-    await new Promise((r) => setTimeout(r, 2000))
-  }
-  return false
-}
-
-/** 从会话列表里挑一个已完成的会话，用于建群（无新对话任务时的兜底） */
-async function pickGroupChatSession(cookie, base) {
-  try {
-    const response = await fetch(
-      `${base}/api/public/v1/session_list?limit=30&exclude_agent=false&session_types=cowork_client&session_types=cowork_web&session_types=chat`,
-      { headers: basicHeaders(cookie, base), signal: AbortSignal.timeout(20000) },
-    )
-    if (!response.ok) return ""
-    const payload = await response.json().catch(() => ({}))
-    const list = Array.isArray(payload?.data?.list) ? payload.data.list : []
-    for (const session of list) {
-      const id = String(session?.session_id ?? "")
-      if (!id) continue
-      try {
-        const detail = await fetch(`${base}/api/public/v1/sessions/${id}`, {
-          headers: basicHeaders(cookie, base),
-          signal: AbortSignal.timeout(15000),
-        })
-        if (!detail.ok) continue
-        const data = await detail.json().catch(() => ({}))
-        if (data?.data?.execution_status === "completed" || data?.data?.terminal_status === "completed") return id
-      } catch {}
-    }
-    return ""
-  } catch {
-    return ""
-  }
-}
-
-// 设备标识：客户端用 64 位 hex 的 device identity，用 sid 派生保证同账号稳定
-let appServerDeviceIdCache = ""
-async function appServerDeviceId() {
-  if (appServerDeviceIdCache) return appServerDeviceIdCache
-  const { createHash } = await import("node:crypto")
-  appServerDeviceIdCache = createHash("sha256").update("magpie-lingxi-device").digest("hex")
-  return appServerDeviceIdCache
-}
-
-function appServerDeviceName() {
-  try {
-    return userInfo().username || "magpie"
-  } catch {
-    return "magpie"
-  }
-}
-
-/** 创建群聊（group_chat 任务）。返回 { ok, channelId, error } */
+// 本插件只走 HTTP：上游已判 claimable 的直接领；群聊任务用官方 imchat 接口
+// 建群再解散；「专家模式 / 使用客户端」需要一次真实客户端对话（服务端按
+// AI Gateway 的会话判定），纯 HTTP 做不到 —— 保持 incomplete，不假装修好了。
 async function createGroupChatWith(cookie, base, sessionId) {
   try {
     const response = await fetch(`${base}/api/imchat/v1/channels`, {
@@ -1777,43 +1008,19 @@ async function completeOneTimeTasks(cookie, base, tasks) {
   let bonus = 0
 
   const claimNow = []
-  let needExpert = false
   let needGroup = false
-  let needClient = false
   for (const task of tasks || []) {
     if (task?.type !== "one_time" || !task?.task_key) continue
     if (task.status === "claimable") claimNow.push(task.task_key)
-    else if (task.status === "incomplete") {
-      if (task.action === "expert_mode") needExpert = true
-      else if (task.action === "group_chat") needGroup = true
-      else if (task.action === "download_client") needClient = true
-    }
+    else if (task.status === "incomplete" && task.action === "group_chat") needGroup = true
   }
 
   const bal = await balanceTotal(cookie, base)
   const poor = bal !== null && bal <= 0
-  if (poor && (needExpert || needClient || needGroup)) msg.push("余额不足，跳过需消耗的任务")
-
-  let sessionId = ""
-  let stopAppServer = null
-
-  if ((needExpert || needClient) && !poor) {
-    const chat = await runAppServerChat(cookie, base)
-    sessionId = chat.sessionId || ""
-    if (chat.ok) {
-      stopAppServer = chat.stop
-      msg.push("客户端对话 ✓")
-    } else {
-      msg.push(`对话失败(${chat.error || "?"})`)
-    }
-  }
+  if (poor && needGroup) msg.push("余额不足，跳过建群")
 
   if (needGroup && !poor) {
-    let sid = sessionId
-    if (!sid) {
-      sid = await pickGroupChatSession(cookie, base)
-      if (sid) msg.push("取历史会话 ✓")
-    }
+    const sid = await pickGroupChatSession(cookie, base)
     if (sid) {
       const group = await createGroupChatWith(cookie, base, sid)
       if (group.ok) {
@@ -1826,9 +1033,6 @@ async function completeOneTimeTasks(cookie, base, tasks) {
       msg.push("建群失败（无可用会话）")
     }
   }
-
-  // app-server 要活到建群结束
-  try { stopAppServer?.() } catch {}
 
   // 重拉任务，领取所有 claimable（含刚被动作带出来的）
   const after = await listTasks(cookie, base)
@@ -1880,7 +1084,7 @@ function claimDate(daily) {
 }
 
 // 动态拉取网页端可用模型
-async function fetchLiveModels(cookie, base = LINGXI_BASE) {
+async function fetchModelPlans(cookie, base = BASE) {
   try {
     const res = await fetch(`${base}/api/aioffice/v1/sessions/plans`, { headers: basicHeaders(cookie, base) })
     if (!res.ok) return []
@@ -1933,7 +1137,7 @@ export async function WPSLingxiAuthPlugin(input = {}, options = {}) {
       const p = config.provider[PROVIDER]
       p.name ??= "WPS 灵犀"
       p.npm ??= NPM
-      p.api ??= `${LINGXI_BASE}/api`
+      p.api ??= `${BASE}/api`
       // the variants are this plugin's own, not those a host stored from an
       // earlier release (an array, whose keys it read as "0", "1", "2"); a
       // model this plugin doesn't define is left without them, which a host
@@ -1955,28 +1159,16 @@ export async function WPSLingxiAuthPlugin(input = {}, options = {}) {
 
     provider: {
       id: PROVIDER,
-      // 原生通路用 cowork 的模型目录（key/name/desc），网页通路用灵犀网页的模型表
+      // 模型目录只取客户端自己用的 /api/aioffice/v1/sessions/plans（plans + models）。
       async models(provider, { auth } = {}) {
         const cookie = resolveCookie(auth)
-        if (cookie && NATIVE_MODE !== "legacy") {
-          try {
-            const list = await fetchNativeCatalog(cookie)
-            return Object.fromEntries(list.map((m) => [m.key, modelOf(provider, {
-              id: m.key,
-              name: m.name,
-              context: 1048576,
-              reasoning: true,
-            })]))
-          } catch {
-            // 原生目录不可用 → 回落到网页模型表，loader 也会走网页通路
-          }
-        }
         if (cookie) {
-          const live = await fetchLiveModels(cookie, resolveBase(auth))
+          const live = await fetchModelPlans(cookie, resolveBase(auth))
           if (live.length) {
             return Object.fromEntries(live.map((m) => [m.id, modelOf(provider, m)]))
           }
         }
+        // 未登录（或目录暂时不可达）时给一份客户端目录的快照，不假装是实时数据。
         return Object.fromEntries(DEFAULT_MODELS.map((m) => [m.id, modelOf(provider, m)]))
       },
     },
@@ -2088,27 +1280,27 @@ export async function WPSLingxiAuthPlugin(input = {}, options = {}) {
 
           // 路由页和额度面板要的是“窗口”（总额/剩余/已用/重置时间），
           // 只给 balance 字符串会被当成“剩余额度未知”。
-          const windows = []
-          {
-            const usedPct = totalValue > 0 && totalConsumed !== null ? Math.max(0, Math.min(100, (totalConsumed / totalValue) * 100)) : null
-            windows.push({
-              name: "智点",
-              ...(usedPct !== null ? { used: usedPct } : {}),
-              remaining: totalBalance,
-              amount: totalBalance,
-              ...(totalValue > 0 ? { limit: totalValue } : {}),
-              display: totalValue > 0 ? `${totalBalance.toLocaleString()} / ${totalValue.toLocaleString()} 智点` : `${totalBalance.toLocaleString()} 智点`,
-              unit: "智点",
-              // Credit expiry is not a replenishment or total-balance exhaustion time.
-            })
-          }
+          // used 必须是有限数字：有总额/已用时给百分比，钱包型（没有总额）给 0。
+          const hasQuota = totalValue > 0 && totalConsumed !== null
+          const usedPct = hasQuota ? Math.max(0, Math.min(100, (totalConsumed / totalValue) * 100)) : 0
+          const windows = [{
+            name: "智点",
+            used: usedPct,
+            remaining: totalBalance,
+            ...(hasQuota ? { amount: totalConsumed, limit: totalValue } : {}),
+            display: hasQuota
+              ? `${totalBalance.toLocaleString()} / ${totalValue.toLocaleString()} 智点`
+              : `${totalBalance.toLocaleString()} 智点`,
+            unit: "智点",
+            // 到期时间不是“补充时间”，这里不放进 resetsAt，只作为 until 展示。
+          }]
 
           return {
             plan: "WPS 灵犀",
             user: auth.accountId || "WPS 账户",
             balance: `${totalBalance.toLocaleString()} 智点`,
             windows,
-            until: earliestExpire,
+            until: toIso(earliestExpire),
             signIn: "kept",
           }
         } catch (e) {
@@ -2120,7 +1312,7 @@ export async function WPSLingxiAuthPlugin(input = {}, options = {}) {
       async loader(getAuth) {
 
         return {
-          baseURL: `${LINGXI_BASE}/api`,
+          baseURL: `${BASE}/api`,
           apiKey: "placeholder",
           async fetch(input, init = {}) {
             const auth = await getAuth()
@@ -2160,350 +1352,14 @@ export async function WPSLingxiAuthPlugin(input = {}, options = {}) {
               requestedModel = "deepseek-v4.1-flash"
             }
 
-            // 两条平面：带 tools 的任务走 agent-runtime（工具真可用）；纯文本仍走老会话平面。
-            // options.plane = "agent" | "legacy" 可强制，默认 auto（有 tools 就用 agent）。
-            const toolsSeen = filterTools(body.tools)
-            const hasTools = toolsSeen.tools.length > 0
-            const plane = options?.plane === "legacy" ? "legacy" : options?.plane === "agent" ? "agent" : (hasTools ? "agent" : "legacy")
-            if (plane === "legacy" && hasTools) {
-              return errorResponse("legacy 平面不支持 tools（请把 plane 设为 agent）", 400, "tools_unsupported")
-            }
-            if (plane === "agent") {
-              try {
-                return await agentChat({ cookie, body, stream, requestedModel, signal, errorResponse })
-              } catch (error) {
-                signal?.throwIfAborted()
-                const absent = error?.status === 404 || error?.status === 405 || /not found|未找到/i.test(String(error?.message))
-                if (hasTools || !absent) return errorResponse(error?.message || String(error), error?.status || 502)
-                // 没有工具的任务：agent-runtime 不可用时继续走下面的老路径
-              }
-            }
-
-            const tools = TOOL_BRIDGE_ENABLED ? normalizeTools(body.tools) : []
-            const toolNames = new Set(tools.map((t) => t.name))
-
-            // 上游只接受一个 question 文本，结构化对话必须压平；但压平不等于抹平：
-            // system 单独成段放最前、工具清单独立成段、历史与当前请求分开，
-            // 模型才不会把系统指令当成“引用的历史文本”，也不会把工具表当成闲聊内容。
-            function renderMessage(m) {
-              const text = contentToText(m?.content)
-              if (m?.role === "assistant") {
-                const body = [text, nativeCallBlock(m.tool_calls)].filter(Boolean).join("\n")
-                return body ? `Assistant: ${body}` : ""
-              }
-              if (m?.role === "tool" || m?.role === "function") {
-                return `Tool (${m?.name || m?.tool_call_id || "tool"}): ${text}`
-              }
-              return `User: ${text}`
-            }
-
-            // 同一段 system 在多轮里会重复下发，去重后只保留一份
-            const systemTexts = []
-            for (const m of messages) {
-              if (m?.role !== "system" && m?.role !== "developer") continue
-              const text = contentToText(m.content).trim()
-              if (text && !systemTexts.includes(text)) systemTexts.push(text)
-            }
-
-            // 最后一条是用户消息 → 它才是本次请求；否则（工具结果回灌等）整段按时间顺序保留，
-            // 补一句“继续”，避免把 assistant/tool 消息排到请求前面去。
-            const trailing = messages.length ? messages[messages.length - 1] : null
-            const endsWithUser = trailing?.role === "user"
-            let request
-            let historyMessages = messages
-            if (endsWithUser) {
-              request = contentToText(trailing.content)
-              historyMessages = messages.slice(0, -1)
-            } else if (!messages.length) {
-              request = "你好"
-            } else if (trailing?.role === "tool" || trailing?.role === "function") {
-              request = "（工具已返回结果，请据此继续，不要重复调用同一个工具。）"
-            } else {
-              request = "（请继续。）"
-            }
-
-            const history = []
-            for (const m of historyMessages) {
-              const role = m?.role
-              if (role === "system" || role === "developer") continue
-              const line = renderMessage(m)
-              if (line) history.push(line)
-            }
-
-            const sections = []
-            if (systemTexts.length) sections.push(`SYSTEM:\n${systemTexts.join("\n\n")}`)
-            if (tools.length) sections.push(`TOOLS:\n${toolProtocolPrompt(tools)}`)
-            if (history.length) sections.push(history.join("\n\n"))
-            sections.push(`User: ${request}`)
-            const question = sections.join("\n\n")
-
-            // Normalize named client variants to the upstream 0/1/2 protocol.
-            const effort = body.reasoning_effort ?? body.reasoningEffort ?? body.thinking_level
-            const effortMap = { low: "0", high: "1", max: "2", "0": "0", "1": "1", "2": "2" }
-            const normalizedEffort = effort == null || effort === "" || !Object.hasOwn(effortMap, String(effort))
-              ? undefined : effortMap[String(effort)]
-            if (effort != null && effort !== "" && normalizedEffort === undefined) {
-              return errorResponse("Unsupported reasoning effort", 400, "invalid_reasoning_effort")
-            }
-
-            // 获取或创建 session_id
-            async function createSession() {
-              const sessRes = await fetch(`${base}/api/aigc/v3/assistant/sessions`, {
-                method: "POST",
-                signal,
-                headers: {
-                  Cookie: cookie,
-                  "Content-Type": "application/json",
-                  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                  Referer: `${base}/`,
-                },
-                body: "{}",
-              })
-              if (!sessRes.ok) {
-                const error = new Error(`Session creation failed: HTTP ${sessRes.status}`)
-                error.status = sessRes.status
-                throw error
-              }
-              const sessData = await sessRes.json()
-              const id = sessData?.data?.session_id
-              if (typeof id !== "string" || !id.trim()) throw new Error("Session creation returned no session ID")
-              return id
-            }
-
-            // 灵犀同一 session 并发会返回 event:error：每个请求各建一个会话
-            let activeSessionId
-            try { activeSessionId = await createSession() }
-            catch (error) {
+            // 桌面客户端只有一条通路：cowork 会话 → credits/run → agent-runtime。
+            // 网页平面（/api/aigc/v3/assistant/* 的 question 压平与正文工具桥）已移除。
+            try {
+              return await agentChat({ cookie, body, stream, requestedModel, signal, errorResponse })
+            } catch (error) {
               signal?.throwIfAborted()
-              return errorResponse(error.message, error.status || 502)
+              return errorResponse(error?.message || String(error), chatErrorStatus(error), "upstream_error")
             }
-
-            // 发起请求到官方 completions 端点
-            async function sendCompletions(sessId) {
-              const payload = {
-                question,
-                // 网页端用 expect_model 指定模型；model 只是兼容旧行为的别名
-                expect_model: requestedModel,
-                model: requestedModel,
-                user_input: { text: question },
-                thinking: thinkingModeFor(normalizedEffort),
-                with_mcp: WITH_MCP,
-                with_expert: false,
-              }
-              if (normalizedEffort !== undefined) payload.reasoning_effort = normalizedEffort
-
-              return fetch(`${base}/api/aigc/v3/assistant/sessions/${sessId}/completions`, {
-                method: "POST",
-                signal,
-                headers: {
-                  Cookie: cookie,
-                  "Content-Type": "application/json",
-                  "X-Cc-Version": "1",
-                  "X-Client-Type": "lingxi-web",
-                  "X-Cc-Entrance": "default",
-                  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                  Referer: `${base}/`,
-                },
-                body: JSON.stringify(payload),
-              })
-            }
-
-            let upstreamRes
-            try { upstreamRes = await sendCompletions(activeSessionId) }
-            catch (error) {
-              signal?.throwIfAborted()
-              return errorResponse("Unable to read WPS Lingxi upstream response")
-            }
-
-
-            if (!upstreamRes.ok) {
-              const errText = await upstreamRes.text().catch(() => "")
-              return new Response(
-                JSON.stringify({
-                  error: {
-                    message: `WPS 灵犀上游响应异常: HTTP ${upstreamRes.status} ${errText}`,
-                    type: "upstream_error",
-                    code: upstreamRes.status,
-                  },
-                }),
-                {
-                  status: upstreamRes.status,
-                  headers: { "Content-Type": "application/json" },
-                }
-              )
-            }
-            if (!upstreamRes.body) return errorResponse("WPS Lingxi upstream returned no response body")
-
-            // Parse SSE frames independently of network and UTF-8 chunk boundaries.
-            const decoder = new TextDecoder()
-            const encoder = new TextEncoder()
-            const completionId = `chatcmpl-${Date.now()}`
-            let lineBuffer = "", eventName = "", dataLines = []
-            let sawError = false, ended = false
-            let upstreamError = { message: "Upstream stream ended without a completion marker", type: "upstream_error", code: "incomplete_stream" }
-            const toolParser = createToolCallParser(toolNames)
-            let toolCallCount = 0
-            function emit(controller, value) {
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify(value)}\n\n`))
-            }
-            function chunk(delta, finishReason = null) {
-              return {
-                id: completionId, object: "chat.completion.chunk",
-                created: Math.floor(Date.now() / 1000), model: requestedModel,
-                choices: [{ delta, index: 0, finish_reason: finishReason }],
-              }
-            }
-            function emitEvents(controller, events) {
-              for (const event of events) {
-                if (event.type === "text") {
-                  if (event.value) emit(controller, chunk({ content: event.value }))
-                  continue
-                }
-                for (const call of event.calls) {
-                  const index = toolCallCount++
-                  emit(controller, chunk({
-                    tool_calls: [{
-                      index,
-                      id: `call_${completionId.slice(-13)}_${index}`,
-                      type: "function",
-                      function: { name: call.name, arguments: call.arguments },
-                    }],
-                  }))
-                }
-              }
-            }
-            function emitText(controller, text) {
-              emitEvents(controller, toolParser.push(text))
-            }
-            function flushText(controller) {
-              emitEvents(controller, toolParser.flush())
-            }
-            function fail(controller, detail) {
-              if (sawError) return
-              sawError = true
-              upstreamError = { message: String(detail?.message || detail?.hint || "WPS Lingxi upstream error"),
-                type: "upstream_error", code: detail?.code || "upstream_error" }
-              emit(controller, { error: upstreamError })
-            }
-            function dispatch(controller) {
-              const raw = dataLines.join("\n")
-              const name = eventName
-              eventName = ""; dataLines = []
-              if (sawError) return
-              let item
-              try { item = raw ? JSON.parse(raw) : null } catch {
-                fail(controller, { message: "Malformed upstream SSE data", code: "invalid_sse" }); return
-              }
-              if (name === "error") { fail(controller, item?.error || item); return }
-              if (!item) return
-              if (item.type === "error") { fail(controller, item.error || item.data || item); return }
-              if (ended) return
-              if (item.type === "reasoning" || item.type === "text") {
-                const value = typeof item.data === "object" ? item.data?.text || "" : String(item.data ?? "")
-                if (item.type === "text") emitText(controller, value)
-                else emit(controller, chunk({ reasoning_content: value }))
-                return
-              }
-              if (item.type === "end" || item.type === "text_end") {
-                ended = true
-                flushText(controller)
-                emit(controller, chunk({}, toolCallCount ? "tool_calls" : "stop"))
-              }
-            }
-            function parse(text, controller, final = false) {
-              lineBuffer += text
-              // CRLF, LF and CR are all legal SSE line endings.
-              while (true) {
-                const match = /[\r\n]/.exec(lineBuffer)
-                if (!match || (!final && match[0] === "\r" && match.index === lineBuffer.length - 1)) break
-                const line = lineBuffer.slice(0, match.index)
-                const width = lineBuffer.slice(match.index, match.index + 2) === "\r\n" ? 2 : 1
-                lineBuffer = lineBuffer.slice(match.index + width)
-                if (!line) dispatch(controller)
-                else if (line.startsWith("event:")) eventName = line.slice(6).trim()
-                else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""))
-              }
-              if (final) {
-                if (lineBuffer.startsWith("data:")) dataLines.push(lineBuffer.slice(5).replace(/^ /, ""))
-                else if (lineBuffer.startsWith("event:")) eventName = lineBuffer.slice(6).trim()
-                if (eventName || dataLines.length) dispatch(controller)
-              }
-            }
-            const streamTransform = new TransformStream({
-              transform(chunk, controller) { parse(decoder.decode(chunk, { stream: true }), controller) },
-              flush(controller) {
-                parse(decoder.decode(), controller, true)
-                if (!ended && !sawError) fail(controller, upstreamError)
-                if (!sawError) controller.enqueue(encoder.encode("data: [DONE]\n\n"))
-              },
-            })
-
-            // 非流式聚合成一次性返回
-            if (!stream) {
-              const reader = upstreamRes.body.pipeThrough(streamTransform).getReader()
-              let fullContent = ""
-              const toolCalls = []
-              try {
-              while (true) {
-                const { done, value } = await reader.read()
-                if (done) break
-                const rawChunk = new TextDecoder().decode(value)
-                for (const l of rawChunk.split("\n")) {
-                  if (l.startsWith("data: ") && !l.includes("[DONE]")) {
-                    try {
-                      const p = JSON.parse(l.slice(6))
-                      const delta = p.choices?.[0]?.delta
-                      fullContent += delta?.content || ""
-                      for (const call of delta?.tool_calls || []) {
-                        const slot = (toolCalls[call.index] ??= {
-                          id: call.id, type: "function", function: { name: "", arguments: "" },
-                        })
-                        if (call.id) slot.id = call.id
-                        if (call.function?.name) slot.function.name += call.function.name
-                        if (call.function?.arguments) slot.function.arguments += call.function.arguments
-                      }
-                    } catch {}
-                  }
-                }
-              }
-              } catch (error) {
-                signal?.throwIfAborted()
-                return errorResponse("WPS Lingxi upstream stream interrupted", 502, "incomplete_stream")
-              } finally {
-                reader.releaseLock()
-              }
-
-              if (sawError) return errorResponse(upstreamError.message, 502, upstreamError.code)
-              const hasToolCalls = toolCalls.length > 0
-              const openAiResponse = {
-                id: `chatcmpl-${Date.now()}`,
-                object: "chat.completion",
-                created: Math.floor(Date.now() / 1000),
-                model: requestedModel,
-                choices: [
-                  {
-                    index: 0,
-                    message: {
-                      role: "assistant",
-                      content: hasToolCalls ? (fullContent || null) : fullContent,
-                      ...(hasToolCalls ? { tool_calls: toolCalls } : {}),
-                    },
-                    finish_reason: hasToolCalls ? "tool_calls" : "stop",
-                  },
-                ],
-              }
-              return new Response(JSON.stringify(openAiResponse), {
-                headers: { "Content-Type": "application/json" },
-              })
-            }
-
-            return new Response(upstreamRes.body.pipeThrough(streamTransform), {
-              headers: {
-                "Content-Type": "text/event-stream; charset=utf-8",
-                "Cache-Control": "no-cache",
-                Connection: "keep-alive",
-              },
-            })
           },
         }
       },
@@ -2607,7 +1463,7 @@ export async function WPSLingxiAuthPlugin(input = {}, options = {}) {
             // 后台打开独立配置的 Chrome/Edge；用户在网页里登录后自动读 wps_sid。
             void (async () => {
               try {
-                const { sid, uid } = await browserLogin({ url: `${AGENT_BASE}/`, timeoutMs: 5 * 60 * 1000, signal: controller.signal })
+                const { sid, uid } = await browserLogin({ url: `${BASE}/`, timeoutMs: 5 * 60 * 1000, signal: controller.signal })
                 await succeed(`wps_sid=${sid}${uid ? `; uid=${uid}` : ""}`)
               } catch (error) {
                 if (settled) return
@@ -2661,6 +1517,7 @@ export default WPSLingxiAuthPlugin
 
 // 内部工具（单测/排障用；magpie 只读 default 与命名导出，不受影响）。
 export const _internal = {
+  parseCookieInput,
   extractSid,
   extractUid,
   identityOf,

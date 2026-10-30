@@ -1,4 +1,4 @@
-# @kevinfx/magpie-wps-lingxi
+# @kevinfx/magpie-wps-lingxi（独立维护 fork）
 
 <div align="center">
 
@@ -6,189 +6,162 @@
 
 ### WPS 灵犀 (Lingxi Claw) Provider Plugin for Magpie & OpenCode
 
-[![npm version](https://img.shields.io/npm/v/@kevinfx/magpie-wps-lingxi.svg?color=blue)](https://www.npmjs.com/package/@kevinfx/magpie-wps-lingxi)
-[![Release](https://img.shields.io/github/v/release/KevinFX-code/magpie-wps-lingxi?color=green)](https://github.com/KevinFX-code/magpie-wps-lingxi/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**金山办公 WPS 灵犀（Lingxi / Lingxi Claw）专用的 Magpie 插件**<br>
-一网打尽：**每日自动签到赚取智点、实时算力额度监控、动态网页模型同步与标准 OpenAI 格式反代网关**。
-
 </div>
+
+> **来源与维护**：本项目 fork 自 [KevinFX-code/magpie-wps-lingxi](https://github.com/KevinFX-code/magpie-wps-lingxi)，
+> 原作者 KevinFX-code，原项目 MIT 许可。因为上游更新较慢、PR/issue 长期无人处理，这里单独维护一版：
+> 协议全部按 **WPS 灵犀桌面客户端 1.3.31 安装包** 重新取证，只走桌面端通路，不再使用网页端。
+> 上游的设计与早期实现仍然保留在 git 历史里；升级前请先在本仓库提 issue。
+
+一个 magpie / OpenCode 供应商插件：登录 WPS 灵犀，把它的模型接进 Magpie、DeepSeek Harness、
+Claude Code、Codex、Cursor 等任何支持 OpenAI 格式的客户端。
+
+**桌面端对齐（灵犀 1.3.31）**：14 个默认模型、1 条对话通路、3 个请求步骤（建会话 → 领 run → chat/completions）。
 
 ---
 
 ## 🌟 核心特性
 
-- 🎁 **每日自动签到 (`auth.checkin`)**  
-  无缝接入 Magpie 全局定时签到任务池，每日自动调用金山官方任务中心领取每日智点奖励，记录连续签到天数并防漏签。
-- 📊 **智点额度监控 (`auth.usage`)**  
-  对齐 Magpie Quota 规范，在桌面端配额面板中实时显示剩余可用「智点」总额与最近算力到期时间。
-- 🔄 **动态同步模型目录 (`provider.models`)**  
-  启动或登录后自动对齐灵犀最新模型：原生通路读 `cowork` 的模型目录（含 `plan_pro` / `plan_max` 模式），网页通路回落到灵犀网页模型表（13+ 个，带倍率与 1M 上下文）。
-- 🧬 **原生 Agent Runtime（0.2 新增，推荐）**  
-  走灵犀桌面客户端同款通路 `cowork.wps.cn/api/public/v1/agent-runtime/chat/completions`：**原生 `messages` / `tools` 进，原生 `tool_calls` / `reasoning_content` / `usage` 出**。不再压平提示词、不再从正文反解工具调用，工具循环与官方客户端一致，并带回真实 token 用量。每个请求先 `POST /api/public/v1/credits/runs` 领 `run_id` 再发起。
-- ⚡ **OpenAI 兼容 SSE 反代 (`auth.loader`)**  
-  将通用的 `/v1/chat/completions` 请求转接至金山灵犀官方后端，支持流式打字机、深度思考（`reasoning_content`）与 `[DONE]` 收尾。
-- 🧰 **网页通路兜底（legacy）**  
-  模型不在原生目录里时自动回落到 0.1.x 的网页聊天通路：`tools` 压进提示词，再把正文里的 `<|FunctionCallBegin|>[{"name":…,"parameters":…}]<|FunctionCallEnd|>` 流式翻译成标准 `tool_calls`（含 `finish_reason: "tool_calls"`）。设置 `MAGPIE_LINGXI_TOOL_BRIDGE=0` 可关闭桥接。
-- 🧭 **结构化提示词 (`SYSTEM` / `TOOLS` / 历史 / `User`)**  
-  网页通路只收一个 `question` 字符串，插件按 `SYSTEM → TOOLS → 历史 → User` 分段压平：system 提到最前并去重、工具清单独立成段、历史严格按时间顺序（工具结果回灌时自动补“继续”），避免系统指令被当成“引用的历史文本”。
-- 🧬 **对齐网页端原生调用 (`expect_model` / `thinking` / `with_mcp`)**  
-  网页通路的请求体按真实字段构造：`question`、`expect_model`、`thinking`（`auto`/`disabled`，由 `reasoning_effort` 推导）、`with_mcp`、`with_expert`、`user_input`，并沿用 `X-Cc-Version` / `X-Client-Type` / `X-Cc-Entrance` 头。`MAGPIE_LINGXI_THINKING=auto|disabled` 可强制思考档位，`MAGPIE_LINGXI_WITH_MCP=1` 可打开服务端 MCP 工具。
-- 🔑 **开箱即用鉴权 (`auth.methods`)**  
-  支持粘贴 `wps_sid` 或整段 Cookie；装了 Chrome / Edge 时可自动打开浏览器登录并抓取 Cookie（Safari 的自动化窗口不能手动输入，不支持自动登录）。
+- 🖥 **只走桌面客户端通路**  
+  与安装包里的 app-server 完全一致：`POST /api/aioffice/v1/cowork/sessions` 建会话 →
+  `POST /api/public/v1/credits/runs` 领 run → `POST /api/public/v1/agent-runtime/chat/completions` 对话。
+  原生 `messages` / `tools` 进，原生 `tool_calls` / `reasoning_content` / `usage` 出。
+- 🧹 **没有网页平面**  
+  旧的 `/api/aigc/v3/assistant/...` 通路、`question` 压平、`<|FunctionCallBegin|>` 正文工具桥全部删除；
+  不存在“有 tools 走一条、没 tools 走另一条”的分叉。
+- 🎁 **每日签到 (`auth.checkin`)**  
+  读客户端任务中心 `GET /api/public/v1/tasks`，领取 `daily_check_in`；
+  已领过返回 `done`，领到返回 `claimed` 并用领前/领后余额差作为奖励。
+- 📊 **智点额度 (`auth.usage`)**  
+  `GET /api/public/v1/credits/balance`：`total_balance` 为剩余，`bonus_summary.total_value/total_consumed`
+  给已用比例；钱包型账号（没有总额）也返回有限 `used`，不会从路由里消失。
+- 🔄 **模型目录 (`provider.models`)**  
+  只读客户端自己的 `GET /api/aioffice/v1/sessions/plans`（`plans` + `models`，带倍率与推理档位）；
+  未登录时用手指量的快照，不假装实时。
+- 🔑 **Cookie 归一 + 多账号**  
+  支持裸 `wps_sid`、`wps_sid=…`、整段 `Cookie: wps_sid=…; uid=…`；只保留 `wps_sid` 与 `uid`，
+  按 `uid` 区分账号，第二个账号不会覆盖第一个。
 
 ---
 
-## 🧭 两条通路与模式开关
+## 🔌 对话通路（唯一一条）
 
-| 通路 | 端点 | 输入 | 输出 |
-|---|---|---|---|
-| **native**（默认） | `cowork.wps.cn/…/agent-runtime/chat/completions` | 原生 `messages` + `tools` | 原生 `tool_calls` / `reasoning_content` / `usage` |
-| **legacy**（兜底） | `lingxi.kdocs.cn/…/assistant/sessions/{id}/completions` | 单个 `question` 文本 | 文本信封 → 插件反解 `tool_calls` |
+| 步骤 | 请求 | 说明 |
+|---|---|---|
+| 1 | `POST /api/aioffice/v1/cowork/sessions` | `{session_type:"cowork_client", agent_version:2, env:{device_id,device_name,...}}`，返回 `session_id` |
+| 2 | `POST /api/public/v1/credits/runs` | `{client_request_id, session_id, model_provider:"lingxi", model_id, agent_input:{...}}`，返回 `run_id` |
+| 3 | `POST /api/public/v1/agent-runtime/chat/completions` | 头带 `X-Cc-Session-ID` / `X-Cc-Run-ID`，SSE 返回 |
 
-模式由 `MAGPIE_LINGXI_MODE` 控制：
-
-- `auto`（默认）：模型在原生目录里走 native，否则走 legacy
-- `native`：强制 native（模型名必须是 `cowork` 目录里的 key）
-- `legacy`：强制旧网页通路（0.1.x 行为）
-
-> 原生通路是客户端私有网关，非公开接口；若上游调整字段，插件会明确返回错误而不是静默降级。
-
+- 计费按 run：一个 run 内多次调用只扣一次智点，所以 session/run 按「账号 × 模型」缓存 1 小时；
+  上游报 `SQLNoRows` / 会话不存在时自动重建一次。
+- 响应帧：`data:{"code":"Success","usage":{…},"choices":[{"text","reasoning_content","tool_calls","finish_reason"}]}`，
+  没有 `[DONE]`，靠 `finish_reason` 收尾；`code != Success` 直接作为上游错误返回。
+- 请求头（与客户端一致）：`X-Client-Type: lingxi_claw`、`X-Client-Lang: zh-CN`、
+  `X-Cc-Agent-Type: lingxi_claw`，Cookie 带 `copilot_server_branch` 时再加 `X-Cc-Region`。
 
 ---
 
-## 📦 安装方式
-
-### 方式 1：通过 Magpie CLI 一键安装（推荐）
-
-在终端中执行以下任一命令即可自动完成安装与热加载：
+## 📦 安装
 
 ```bash
-# 从 npm 官方中心安装
-magpie plugin add @kevinfx/magpie-wps-lingxi
+# 从本仓库源码安装
+magpie plugin add github:baijiu666/magpie-wps-lingxi
 
-# 或从 GitHub 源码安装
-magpie plugin add github:KevinFX-code/magpie-wps-lingxi
+# 或在本地开发目录
+magpie plugin add /path/to/magpie-wps-lingxi
 ```
 
----
-
-### 方式 2：通过配置文件声明
-
-在 Magpie 配置目录（`~/.config/magpie/plugins.json`）中直接加入声明：
+也可以写进 `~/.config/magpie/plugins.json`：
 
 ```json
 {
-  "plugins": [
-    {
-      "spec": "@kevinfx/magpie-wps-lingxi@latest"
-    }
-  ]
+  "plugins": [{ "spec": "github:baijiu666/magpie-wps-lingxi" }]
 }
 ```
 
----
-
-### 方式 3：本地开发调试
-
-如果您下载了源码进行二次开发：
-
-```bash
-# 进入 Magpie 插件配置目录
-cd ~/.config/magpie/plugins
-
-# 链接本地项目
-npm install "/path/to/magpie-wps-lingxi"
-```
+> 安装前先关掉上游同名插件：两者声明同一个 provider id `wps-lingxi`，同时启用会互相覆盖。
 
 ---
 
-## 🚀 登录与使用指引
+## 🚀 登录与使用
 
-### 1. 登录授权
-
-安装后在终端运行：
 ```bash
 magpie plugin login wps-lingxi
 ```
-<<<<<<< HEAD
-或直接在 **Magpie 桌面客户端** 的 Provider 管理面板中找到 **WPS 灵犀** 点击 **Login**：
-1. **直接粘贴**：打开 [lingxi.kdocs.cn](https://lingxi.kdocs.cn/)，按 `F12` -> 【Application/应用】->【Cookies】，复制 `wps_sid` 的值粘贴提交；也可以整段复制（`wps_sid=…; uid=…`），插件会自动挑出需要的字段；
-2. **网页授权**：点击后将自动弹出本地向导页面，按提示粘贴确认即可完成绑定。
-=======
-或直接在 **Magpie 桌面客户端** 的 Provider 管理面板中找到 **WPS 灵犀** 点击 **Login**，有两种方式：
 
-1. **浏览器登录（推荐，自动抓 Cookie）**：插件会打开一个独立的浏览器窗口，你在里面正常登录 WPS；登录完成后 `wps_sid` 会自动读取并保存，**不需要复制任何东西**。
-   - macOS 上用 Chrome / Edge / Chromium / Brave（CDP 读 Cookie）。
-   - Safari 的自动化窗口在会话期间会锁住键盘，没法手动登录，而且它用临时配置读不到 Safari 现有的登录态 —— 所以 Safari 不支持自动登录；请装 Chrome/Edge，或用手动粘贴。
-   - 没有 Chromium 系浏览器时，页面会提示原因，并保留下面的手动粘贴方式。
-2. **手动粘贴（兜底）**：打开 [lingxi.wps.cn](https://lingxi.wps.cn/) 登录，按 `F12` → 【Application / 应用】→【Cookies】，复制 `wps_sid` 的值，或者直接粘整段 Cookie —— 插件只取其中的 `wps_sid`。
->>>>>>> origin/pr/5
+或在 Magpie 桌面客户端的 Provider 面板点 **Login**：
 
-> 多账号：凭据按 `uid`（没有则取 `wps_sid` 尾部）区分，第二个账号不会覆盖第一个。
+1. **浏览器登录（推荐）**：插件打开独立浏览器窗口，正常登录 WPS 后自动读取 `wps_sid`，不需要复制任何东西
+   （需要 Chrome / Edge / Chromium / Brave；Safari 的自动化窗口会锁键盘且读不到已有登录态）。
+2. **手动粘贴**：打开 [lingxi.wps.cn](https://lingxi.wps.cn/) 登录，`F12` → Application → Cookies，
+   复制 `wps_sid`，或整段 Cookie（插件只取 `wps_sid` 与 `uid`）。
 
-### 2. 查看配额与签到
-- 查看当前可用智点余额：
-  ```bash
-  magpie quota wps-lingxi
-  ```
-- 手动触发签到自测：
-  ```bash
-  magpie accounts checkin
-  ```
+多账号：凭据按 `uid` 区分（没有 `uid` 时按 `wps_sid` 尾部），界面显示尾号 4 位。
 
-### 3. 在 Agent 工具中使用
-在 **DeepSeek Harness**、**Claude Code**、**Codex**、**Cursor** 或任何支持 OpenAI 格式的客户端中：
-- **Base URL**: `http://127.0.0.1:3425/v1`
-- **Model**: 直接选用下方支持的任一模型标识（如 `wps-lingxi/deepseek-v4.1-flash`）即可开始对话！
+查看额度与签到：
 
----
-
-## 📋 官方动态同步模型列表
-
-插件与灵犀网页端保持 1:1 动态实时同步，默认支持的模型包括：
-
-| 模型标识 (Model ID) | 模型名称 | 上下文长度 | 智点倍率 | 深度思考 (Reasoning) |
-| :--- | :--- | :--- | :--- | :---: |
-| `wps-lingxi/deepseek-v4.1-flash` | DeepSeek V4.1 Flash | 1M (1,048,576) | ~0.12x | ✅ 支持 |
-| `wps-lingxi/deepseek-v4-flash-0731` | DeepSeek V4 Flash | 1M (1,048,576) | 0.09x | ✅ 支持 |
-| `wps-lingxi/deepseek-v4-pro-0813` | DeepSeek V4 Pro | 1M (1,048,576) | 0.40x | ✅ 支持 |
-| `wps-lingxi/kimi-k3` | Kimi-K3 | 1M (1,048,576) | 1.60x | ✅ 支持 |
-| `wps-lingxi/GLM-5.3` | GLM-5.3 | 1M (1,048,576) | ~0.75x | ✅ 支持 |
-| `wps-lingxi/GLM-5.3-Flash` | GLM-5.3-Flash | 1M (1,048,576) | ~0.11x | ✅ 支持 |
-| `wps-lingxi/qwen3.8_max` | Qwen3.8-Max | 1M (1,048,576) | ~0.80x | ✅ 支持 |
-| `wps-lingxi/qwen3.8_flash` | Qwen3.8-Flash | 1M (1,048,576) | ~0.08x | ✅ 支持 |
-| `wps-lingxi/minimax_m3` | MiniMax-M3 | 1M (1,048,576) | 0.20x | ❌ |
-| `wps-lingxi/doubao_seed_2_1_pro_260628`| Doubao-Seed-2.1 Pro | 256K (262,144) | ~0.50x | ✅ 支持 |
-| `wps-lingxi/mimo-v2.6-pro` | Xiaomi MiMo-V2.6 Pro | 1M (1,048,576) | 0.10x | ❌ |
-| `wps-lingxi/plan_pro` | Pro 模式 (深度推理模式) | 1M (1,048,576) | 模式自适应 | ✅ 支持 |
-| `wps-lingxi/plan_max` | Max 模式 (复杂任务模式) | 1M (1,048,576) | 模式自适应 | ✅ 支持 |
-| `wps-lingxi/auto` | 自动智能调度模式 | 1M (1,048,576) | 1.0x | ✅ 支持 |
-
----
-
-## 🔌 两条对话平面（2026-10-28）
-
-| 平面 | 端点 | 能力 | 什么时候用 |
-|---|---|---|---|
-| 老会话平面 | `/api/aigc/v3/assistant/sessions/{id}/completions` | 只有一段 `user_input.text`，**没有 tools 槽位** | 纯文本补全 |
-| agent-runtime 直连 | `/api/public/v1/agent-runtime/chat/completions` | OpenAI 形状，`tools` / `tool_calls` **真可用**，`stream:false` 也通 | 带工具的 agent 客户端 |
-
-- 默认 `auto`：请求里带 `tools` 就走 agent-runtime，否则走老平面；`legacy` 平面收到 tools 会明确报错，不会静默丢弃。
-- agent-runtime 三步链：建 cowork session → 建 credits run → 调 chat/completions（头带 `x-cc-session-id` / `x-cc-run-id`）。run 按「账号 × 模型」缓存 1 小时；上游报 `SQLNoRows` / 会话不存在时自动重建一次。计费按 run，一个 run 内多次调用只扣一次智点。
-- 强制某一平面：`magpie plugin options @kevinfx/magpie-wps-lingxi '{"plane":"agent"}'`（或 `"legacy"`）。
-- 登录只认 `wps_sid`：可粘贴裸值、`wps_sid=…` 或整段 Cookie（自动取出 `wps_sid`，其余键丢弃）；账号按 sid 的 hash 区分，界面只显示尾号 4 位。上游 401 会把账号标成需重新登录。
-
-## 🛠 独立测试
-
-项目内置了脱离 Magpie 运行的免安装自测脚本：
 ```bash
-node test_lingxi.mjs "你的wps_sid"
+magpie quota wps-lingxi
+magpie accounts checkin
+```
+
+接进其他客户端：
+
+- **Base URL**: `http://127.0.0.1:3425/v1`
+- **Model**: 例如 `wps-lingxi/deepseek-v4.1-flash`
+
+---
+
+## 📋 模型列表（客户端目录快照）
+
+登录后由 `/api/aioffice/v1/sessions/plans` 实时替换；下表是未登录时的快照。
+
+| 模型标识 | 名称 | 上下文 | 倍率 | 深度思考 |
+| :--- | :--- | :--- | :--- | :---: |
+| `deepseek-v4.1-flash` | DeepSeek V4.1 Flash | 1M | ~0.12x | ✅ |
+| `deepseek-v4-flash-0731` | DeepSeek V4 Flash | 1M | 0.09x | ✅ |
+| `deepseek-v4-pro-0813` | DeepSeek V4 Pro | 1M | 0.40x | ✅ |
+| `kimi-k3` | Kimi-K3 | 1M | 1.60x | ✅ |
+| `GLM-5.3` | GLM-5.3 | 1M | ~0.75x | ✅ |
+| `GLM-5.3-Flash` | GLM-5.3-Flash | 1M | ~0.11x | ✅ |
+| `qwen3.8_max` | Qwen3.8-Max | 1M | ~0.80x | ✅ |
+| `qwen3.8_flash` | Qwen3.8-Flash | 1M | ~0.08x | ✅ |
+| `minimax_m3` | MiniMax-M3 | 1M | 0.20x | ❌ |
+| `doubao_seed_2_1_pro_260628` | Doubao-Seed-2.1 Pro | 256K | ~0.50x | ✅ |
+| `mimo-v2.6-pro` | Xiaomi MiMo-V2.6 Pro | 1M | 0.10x | ❌ |
+| `plan_pro` | Pro 模式（深度推理） | 1M | 模式自适应 | ✅ |
+| `plan_max` | Max 模式（复杂任务） | 1M | 模式自适应 | ✅ |
+| `auto` | 自动调度 | 1M | 1.0x | ✅ |
+
+---
+
+## 🧭 参考源（本版取证）
+
+- 安装包：WPS 灵犀桌面端 **1.3.31**（`lingxi-desktop-1.3.31-setup.exe`）
+  - `resources/app.asar` → `desktop-renderer-dist/assets/webapi-*.js`（Web 侧任务/额度/目录字段）
+  - `resources/app-server/app-server/service/lingxi.exe`（桌面端同款 Agent Runtime 端点与请求头；
+    app-server 版本 5.14.0，commit `a5a37290`）
+- 上游实现与讨论：[KevinFX-code/magpie-wps-lingxi](https://github.com/KevinFX-code/magpie-wps-lingxi)
+  （PR #3 agent-runtime 平面、#4 variants 对象、#5 一次性任务、#6 Cookie 归一）
+- 插件规范：[magpie-plugin-scaffold](https://github.com/MYCF711/magpie-plugin-scaffold)、
+  [usemagpie.ai 插件文档](https://usemagpie.ai/docs/zh/plugins)
+
+> 原生通路是客户端私有网关，不是公开接口；上游改字段时插件会明确报错，不会静默降级。
+
+## 🛠 测试
+
+```bash
+node --test          # 单元测试（网络全部打桩）
+npm run check        # 脚手架规则检查
+npm run score        # 评分
+node tests/test_lingxi.mjs "你的wps_sid"   # 脱离 Magpie 的联调
 ```
 
 ---
 
-## 📄 开源许可证
+## 📄 许可证与署名
 
-本项目基于 [MIT 许可证](LICENSE) 开源发布。
+MIT。原项目：[KevinFX-code/magpie-wps-lingxi](https://github.com/KevinFX-code/magpie-wps-lingxi)，
+原作者 KevinFX-code 及 PR 贡献者（isdoge、shadyrispy、kvoon3、baijiu666）。见 [LICENSE](./LICENSE)。
