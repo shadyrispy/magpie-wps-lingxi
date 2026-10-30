@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.1 — 2026-10-30
+
+- 思考档位按模型下发：`variants` 从目录里的 `reasoning_efforts` 生成，不再所有模型都
+  固定成 `low/high/max`；宿主选档后原样作为 `reasoning_effort` 发给 agent-runtime。
+- 用量归一：`usage` 不再因 `total_tokens=0` 被丢弃；`cached_tokens` /
+  `reasoning_tokens` 转成 `prompt_tokens_details` / `completion_tokens_details`。
+- 每个请求带 `X-Request-Id`；建会话的 `env` 用真实设备名、临时工作目录和稳定
+  device_id，不再写死 `Magpie` / `/tmp`。
+- 修复：`pickGroupChatSession` 在删 app-server 时被误删，导致「体验群聊」任务在运行期
+  抛 ReferenceError；已恢复并补了端到端测试（建群 → 解散 → 重拉 → 领取）。
+- 修复：会话/run 的域名回落丢了 kdocs，恢复为 `lingxi.wps.cn` → `lingxi.kdocs.cn`。
+- 新增 `tests/test_tasks.mjs`：只读 + 领取的任务实测脚本，打印每一步前后的 status；
+  专家模式 / 使用客户端只上报 `incomplete`，不伪造完成。
+
 ## 0.3.0 — 2026-10-30
 
 - 只保留桌面客户端通路：建会话 `POST /api/aioffice/v1/cowork/sessions` → 领 run

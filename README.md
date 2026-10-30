@@ -31,9 +31,12 @@ Claude Code、Codex、Cursor 等任何支持 OpenAI 格式的客户端。
 - 🧹 **没有网页平面**  
   旧的 `/api/aigc/v3/assistant/...` 通路、`question` 压平、`<|FunctionCallBegin|>` 正文工具桥全部删除；
   不存在“有 tools 走一条、没 tools 走另一条”的分叉。
-- 🎁 **每日签到 (`auth.checkin`)**  
+- 🎁 **每日签到 + 一次性任务 (`auth.checkin`)**  
   读客户端任务中心 `GET /api/public/v1/tasks`，领取 `daily_check_in`；
   已领过返回 `done`，领到返回 `claimed` 并用领前/领后余额差作为奖励。
+  一次性任务：上游已判 `claimable` 的直接领；「体验群聊」用官方
+  `POST /api/imchat/v1/channels` 建群再解散完成；「专家模式 / 使用客户端」需要
+  一次真实客户端对话，纯 HTTP 无法翻转状态，**不会假装修好**（详见下文）。
 - 📊 **智点额度 (`auth.usage`)**  
   `GET /api/public/v1/credits/balance`：`total_balance` 为剩余，`bonus_summary.total_value/total_consumed`
   给已用比例；钱包型账号（没有总额）也返回有限 `used`，不会从路由里消失。
@@ -60,6 +63,42 @@ Claude Code、Codex、Cursor 等任何支持 OpenAI 格式的客户端。
   没有 `[DONE]`，靠 `finish_reason` 收尾；`code != Success` 直接作为上游错误返回。
 - 请求头（与客户端一致）：`X-Client-Type: lingxi_claw`、`X-Client-Lang: zh-CN`、
   `X-Cc-Agent-Type: lingxi_claw`，Cookie 带 `copilot_server_branch` 时再加 `X-Cc-Region`。
+
+---
+
+## ✅ 与桌面客户端对齐清单（1.3.31）
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| 对话端点 | ✅ | 只有 `agent-runtime/chat/completions`；网页通路已删 |
+| 会话 / run | ✅ | cowork 会话 + credits/runs，`session_type:"cowork_client"`、`agent_version:2` |
+| 请求头 | ✅ | `X-Client-Type`、`X-Client-Lang`、`X-Cc-Agent-Type`、`X-Cc-Session-ID`、`X-Cc-Run-ID`、`X-Request-Id`；有 `copilot_server_branch` 时带 `X-Cc-Region` |
+| 模型目录 | ✅ | 登录后取 `sessions/plans` 的 `plans`+`models`；未登录用快照 |
+| 思考档位 | ✅ | 每个模型按目录里的 `reasoning_efforts` 生成 `variants`（对象），宿主选档后原样作为 `reasoning_effort` 发上游 |
+| 工具调用 | ✅ | 原生 `tools` / `tool_calls`，不再从正文反解 |
+| 流式帧 | ✅ | `choices[].text` / `reasoning_content` / `tool_calls` / `finish_reason`，`code != Success` 即报错 |
+| 用量 | ✅ | `usage` 原样带回；`cached_tokens` / `reasoning_tokens` 归一成 OpenAI 形状 |
+| 会话缓存 | ✅ | session/run 按「账号 × 模型」缓存 1 小时；上游报会话不存在时重建一次 |
+| 额度 | ✅ | `credits/balance`：`total_balance` + `bonus_summary` 算已用；钱包型也给有限 `used` |
+| 签到 | ✅ | `tasks` + `tasks/{key}/claim`；已领返回 `done` |
+| 多账号 | ✅ | 按 `uid` 区分（无 uid 用 sid 尾部），不互相覆盖 |
+| 错误语义 | ✅ | 模型/参数错误 → 404；明确鉴权失败 → 401 |
+| 一次性任务·群聊 | ✅ | 建群 → 解散 → 重拉任务 → 领取 |
+| 一次性任务·专家/客户端 | ❌ | 服务端按「真实客户端对话」判定；纯 HTTP 实测无法翻转（上游 PR #5 用 app-server 才能做，本版按纯 HTTP 取舍删掉了） |
+| 脚手架 | ✅ | `check.mjs` 30 通过 / 0 警告 / 0 失败；`score.mjs` 身份门通过、自动分 65/65 |
+
+> 未对齐的只有一项：`try_expert_mode` / `use_lingxi_client` 两个一次性任务。需要的话可以加回
+> app-server 内核（Windows、约 90MB 下载）来完成；默认不装。
+
+### 怎么验一次性任务
+
+```bash
+# 只读：看任务状态（group_chat 是否 incomplete/claimable/claimed）
+node tests/test_tasks.mjs --sid "你的 wps_sid"
+```
+
+脚本会：列出任务 → 尝试建群（若群聊未完成）→ 重拉任务 → 领取所有 `claimable`，
+并打印每一步前后的 `status`。**专家/客户端任务只会显示 `incomplete`，脚本不会伪造完成。**
 
 ---
 

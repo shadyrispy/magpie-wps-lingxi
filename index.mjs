@@ -6,7 +6,7 @@ import { createServer } from "node:http"
 import { createHash } from "node:crypto"
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { join } from "node:path"
-import { tmpdir } from "node:os"
+import { tmpdir, userInfo } from "node:os"
 import { exec, spawn } from "node:child_process"
 
 const PROVIDER = "wps-lingxi"
@@ -49,8 +49,14 @@ const DEFAULT_MODELS = [
 // with one key per level, not an array. magpie's plugin host takes
 // Object.keys(variants), and an array's keys are its indexes — which is how
 // ["low","high","max"] came to be read as the levels "0", "1", "2".
-function variantsOf(reasoning) {
-  return reasoning ? { low: {}, high: {}, max: {} } : {}
+function variantsOf(reasoningOrEfforts) {
+  if (Array.isArray(reasoningOrEfforts)) {
+    const levels = [...new Set(reasoningOrEfforts
+      .map((level) => String(level ?? "").trim().toLowerCase())
+      .filter((level) => ["low", "medium", "high", "max"].includes(level)))]
+    if (levels.length) return Object.fromEntries(levels.map((level) => [level, {}]))
+  }
+  return reasoningOrEfforts ? { low: {}, high: {}, max: {} } : {}
 }
 
 function configModels() {
@@ -61,7 +67,7 @@ function configModels() {
         name: `${m.name} (${m.multiplier})`,
         limit: { context: m.context, output: 65536 },
         tool_call: true,
-        ...(m.reasoning ? { reasoning: true, variants: variantsOf(true) } : {}),
+        ...(m.reasoning ? { reasoning: true, variants: variantsOf(m.reasoning_efforts) } : {}),
       },
     ])
   )
@@ -90,7 +96,7 @@ function modelOf(provider, m) {
       interleaved: false,
     },
     release_date: "",
-    variants: variantsOf(isReasoning),
+    variants: variantsOf(m.reasoning_efforts ?? isReasoning),
   }
 }
 
@@ -495,6 +501,14 @@ async function browserLogin({ url, timeoutMs = 5 * 60 * 1000, signal }) {
 // 与客户端 app-server 发出的请求头一致（安装包 1.3.31 取证）：
 // X-Client-Type / X-Client-Lang / X-Cc-Agent-Type + 每个 run 的 X-Cc-Session-ID / X-Cc-Run-ID。
 // X-Cc-Region 只在账号登录时从 Cookie 里带了 copilot_server_branch 才加。
+function requestId() {
+  try {
+    return globalThis.crypto.randomUUID()
+  } catch {
+    return `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`
+  }
+}
+
 function agentHeaders(cookie, base, extra = {}) {
   const region = cookieRegion(cookie)
   return {
@@ -503,6 +517,7 @@ function agentHeaders(cookie, base, extra = {}) {
     "X-Client-Type": CLIENT_TYPE,
     "X-Client-Lang": CLIENT_LANG,
     "X-Cc-Agent-Type": CLIENT_TYPE,
+    "X-Request-Id": requestId(),
     ...(region ? { "X-Cc-Region": region } : {}),
     Referer: `${base}/`,
     "User-Agent": UA,
@@ -597,7 +612,11 @@ async function createCoworkSession(base, cookie, signal) {
   const payload = await postJson(`${base}${AGENT_SESSIONS_PATH}`, cookie, base, {
     session_type: "cowork_client",
     agent_version: 2,
-    env: { device_id: "magpie-lingxi", device_name: "Magpie", work_space_dir: "/tmp" },
+    env: {
+      device_id: createHash("sha256").update("magpie-lingxi-device").digest("hex"),
+      device_name: userInfo().username || "magpie",
+      work_space_dir: tmpdir(),
+    },
   }, signal)
   const id = String(payload?.data?.session_id ?? "").trim()
   if (!id) throw new Error("灵犀未返回 session_id")
@@ -631,7 +650,7 @@ async function ensureRun(cookie, key, model, title, signal) {
   if (hit && Date.now() - hit.at < RUN_TTL_MS) return hit
   let lastError
   // 先试 wps.cn（reference 实测的平面），404/401 再回落登录用的 kdocs 域名。
-  for (const base of [BASE, BASE]) {
+  for (const base of [BASE, KDOCS_BASE]) {
     try {
       const sessionId = await createCoworkSession(base, cookie, signal)
       const runId = await createCreditsRun(base, cookie, sessionId, model, title, signal)
@@ -664,6 +683,22 @@ function buildAgentBody(body, model) {
 
 // 上游帧：data:{"code":"Success","usage":{…},"choices":[{"text","reasoning_content","tool_calls","finish_reason"}]}
 // 没有 [DONE]，靠 finish_reason 收尾；正文在 choices[].text（不是 delta.content）。
+// 上游 usage 的缓存/推理字段名和 OpenAI 不完全一致（cached_tokens / prompt_tokens_details），
+// 这里统一成 magpie 认的形状，别把缓存命中丢掉。
+function normalizeUsage(usage) {
+  if (!usage || typeof usage !== "object") return null
+  const out = {
+    prompt_tokens: Number(usage.prompt_tokens ?? 0) || 0,
+    completion_tokens: Number(usage.completion_tokens ?? 0) || 0,
+    total_tokens: Number(usage.total_tokens ?? 0) || 0,
+  }
+  const cached = Number(usage.cached_tokens ?? usage.prompt_tokens_details?.cached_tokens ?? 0)
+  if (cached > 0) out.prompt_tokens_details = { cached_tokens: cached }
+  const reasoning = Number(usage.reasoning_tokens ?? usage.completion_tokens_details?.reasoning_tokens ?? 0)
+  if (reasoning > 0) out.completion_tokens_details = { reasoning_tokens: reasoning }
+  return out
+}
+
 class LingxiTranslator {
   constructor(model) {
     this.model = model
@@ -734,9 +769,8 @@ class LingxiTranslator {
       this.finished = true
       throw new Error(`灵犀上游返回 ${code}：${textOfPayload(frame) || "上游错误"}`)
     }
-    if (frame?.usage && typeof frame.usage === "object" && Number(frame.usage.total_tokens) > 0) {
-      this.usage = frame.usage
-    }
+    const usage = normalizeUsage(frame?.usage)
+    if (usage) this.usage = usage
     const choices = Array.isArray(frame?.choices) ? frame.choices : []
     for (const choice of choices) {
       const text = typeof choice?.text === "string" ? choice.text : ""
@@ -787,7 +821,8 @@ function foldFrames(frames) {
     let value
     try { value = JSON.parse(text) } catch { continue }
     if (value?.error) throw new Error(value.error.message || "灵犀上游错误")
-    if (value?.usage) usage = value.usage
+    const normalized = normalizeUsage(value?.usage)
+    if (normalized) usage = normalized
     const choice = value?.choices?.[0]
     if (!choice) continue
     const delta = choice.delta || {}
@@ -965,6 +1000,36 @@ async function claimTask(cookie, base, key, date) {
 // 本插件只走 HTTP：上游已判 claimable 的直接领；群聊任务用官方 imchat 接口
 // 建群再解散；「专家模式 / 使用客户端」需要一次真实客户端对话（服务端按
 // AI Gateway 的会话判定），纯 HTTP 做不到 —— 保持 incomplete，不假装修好了。
+// 建群要求会话已完成（execution_status/terminal_status = completed），
+// 没有已完成会话时这个任务做不了 —— 返回空串让调用方如实报告。
+async function pickGroupChatSession(cookie, base) {
+  try {
+    const response = await fetch(
+      `${base}/api/public/v1/session_list?limit=30&exclude_agent=false&session_types=cowork_client&session_types=cowork_web&session_types=chat`,
+      { headers: basicHeaders(cookie, base), signal: AbortSignal.timeout(20000) },
+    )
+    if (!response.ok) return ""
+    const payload = await response.json().catch(() => ({}))
+    const list = Array.isArray(payload?.data?.list) ? payload.data.list : []
+    for (const session of list) {
+      const id = String(session?.session_id ?? "")
+      if (!id) continue
+      try {
+        const detail = await fetch(`${base}/api/public/v1/sessions/${id}`, {
+          headers: basicHeaders(cookie, base),
+          signal: AbortSignal.timeout(15000),
+        })
+        if (!detail.ok) continue
+        const data = await detail.json().catch(() => ({}))
+        if (data?.data?.execution_status === "completed" || data?.data?.terminal_status === "completed") return id
+      } catch {}
+    }
+    return ""
+  } catch {
+    return ""
+  }
+}
+
 async function createGroupChatWith(cookie, base, sessionId) {
   try {
     const response = await fetch(`${base}/api/imchat/v1/channels`, {
@@ -1101,6 +1166,7 @@ async function fetchModelPlans(cookie, base = BASE) {
           multiplier: "模式",
           context: p.max_context_tokens || 1048576,
           support_multimodal: p.support_multimodal,
+          reasoning_efforts: p.reasoning_efforts || [],
           reasoning: true,
         })
       }

@@ -243,3 +243,50 @@ test('checkin marks an expired cookie for re-login', async () => {
     net.restore()
   }
 })
+
+test('a group_chat one-time task is completed by creating and deleting a channel', async () => {
+  const plugin = await WPSLingxiAuthPlugin()
+  let phase = 0
+  const net = installFetch((call) => {
+    if (call.url.endsWith('/api/public/v1/tasks')) {
+      const daily = { task_key: 'daily_check_in', type: 'daily', status: 'claimed', reward_amount: 100, extra: { consecutive_days: 2 } }
+      const group = phase === 0
+        ? { task_key: 'try_group_chat', type: 'one_time', status: 'incomplete', action: 'group_chat', reward_amount: 400 }
+        : { task_key: 'try_group_chat', type: 'one_time', status: 'claimable', action: 'group_chat', reward_amount: 400 }
+      const tasks = [daily, group]
+      return Response.json({ result: 'ok', data: { tasks } })
+    }
+    if (call.url.includes('/api/public/v1/credits/balance')) return Response.json({ data: { total_balance: 500 } })
+    if (call.url.includes('/api/public/v1/session_list')) {
+      return Response.json({ result: 'ok', data: { list: [{ session_id: 'done-1' }, { session_id: 'running-1' }] } })
+    }
+    if (call.url.endsWith('/api/public/v1/sessions/done-1')) {
+      return Response.json({ data: { execution_status: 'completed' } })
+    }
+    if (call.url.endsWith('/api/public/v1/sessions/running-1')) {
+      return Response.json({ data: { execution_status: 'running' } })
+    }
+    if (call.url.endsWith('/api/imchat/v1/channels') && call.method === 'POST') {
+      assert.equal(call.body.session_id, 'done-1')
+      return Response.json({ code: 'Success', data: { channel_id: 'ch-1' } })
+    }
+    if (call.url.endsWith('/api/imchat/v1/channels/ch-1') && call.method === 'DELETE') {
+      phase = 1
+      return Response.json({ code: 'Success', data: {} })
+    }
+    if (call.url.includes('/tasks/try_group_chat/claim')) {
+      return Response.json({ result: 'ok', data: { reward_amount: 400 } })
+    }
+    return new Response('not found', { status: 404 })
+  })
+  try {
+    const result = await plugin.auth.checkin(async () => ({ cookie: COOKIE }))
+    assert.equal(result.outcome, 'claimed')
+    assert.equal(result.credit, 400)
+    assert.ok(net.calls.some((c) => c.url.endsWith('/api/imchat/v1/channels') && c.method === 'POST'))
+    assert.ok(net.calls.some((c) => c.url.endsWith('/api/imchat/v1/channels/ch-1') && c.method === 'DELETE'))
+    assert.ok(net.calls.some((c) => c.url.includes('/tasks/try_group_chat/claim')))
+  } finally {
+    net.restore()
+  }
+})
