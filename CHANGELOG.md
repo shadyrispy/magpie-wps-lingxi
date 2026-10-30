@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.9 — 2026-10-31
+
+继续死磕纯协议的任务完成（不引入 app-server）：
+
+- **Cookie 客户端化**：所有 `*.wps.cn` 请求的 Cookie 追加 `x-kso-app-name=win-lingxi-desktop`、
+  `x-kso-app-version`、`x-kso-device-id`（照抄客户端 main 进程的注入行为；
+  需 plussvr RSA 的 device-signature 暂不带）。
+- **专家任务改走网页端同款 aigc 平面**：`POST /api/aigc/v3/assistant/sessions` 带
+  `session_mode:"expert"` → `…/completions` 带 `with_expert:true`（渲染层原样复刻；
+  之前只在 cowork 平面带 session_mode，可能根本不是服务端看的信号）。
+- 客户端任务保持 cowork 三处 `client_type`；对话模型改用账号必有的 `plan_pro`，
+  `max_tokens` 提到 256（真实完成一轮，产生计费信号）。
+- 失败可观察：签到 message 会带上每个任务对话失败的具体原因。
+- 真实账号冒烟通过（已领完的任务走 done 路径不受影响）。
+
 ## 0.3.8 — 2026-10-31
 
 - 修 #2：专家任务的 `credits/runs` 现在带 `agent_input.current_mode=expert`

@@ -1,5 +1,6 @@
-// 专家模式 / 使用客户端：纯协议能做的就是带对标志发一次对话，
-// 然后重拉任务看服务端是否翻转。这里锁住“标志确实发出去了”。
+// 专家模式（aigc 平面）/ 使用客户端（cowork + client_type）：
+// 纯协议能做的就是带对标志发一次对话，然后重拉任务看服务端是否翻转。
+// 这里锁住“标志确实发出去了”与“Cookie 带 x-kso-* 客户端标识”。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { WPSLingxiAuthPlugin } from '../index.mjs'
@@ -20,7 +21,7 @@ function installFetch(handler) {
   return { calls, restore() { globalThis.fetch = original } }
 }
 
-test('expert and client tasks send the right flags and then re-read the task list', async () => {
+test('expert (aigc) and client (cowork) attempts send the right flags; cookies carry x-kso-*', async () => {
   const plugin = await WPSLingxiAuthPlugin()
   let taskReads = 0
   const net = installFetch((call) => {
@@ -39,10 +40,18 @@ test('expert and client tasks send the right flags and then re-read the task lis
       })
     }
     if (call.url.includes('/api/public/v1/credits/balance')) return Response.json({ data: { total_balance: 500 } })
-    if (call.url.endsWith('/api/aioffice/v1/cowork/sessions')) return Response.json({ data: { session_id: 's' + taskReads + Math.random() } })
-    if (call.url.endsWith('/api/public/v1/credits/runs')) return Response.json({ data: { run_id: 'r' + Math.random() } })
+    if (call.url.endsWith('/api/aioffice/v1/cowork/sessions')) return Response.json({ data: { session_id: 's1' } })
+    if (call.url.endsWith('/api/public/v1/credits/runs')) return Response.json({ data: { run_id: 'r1' } })
     if (call.url.endsWith('/api/public/v1/agent-runtime/chat/completions')) {
       return new Response('data: {"code":"Success","choices":[{"text":"ok","finish_reason":"stop"}]}\n\n', {
+        headers: { 'content-type': 'text/event-stream' },
+      })
+    }
+    if (call.url.endsWith('/api/aigc/v3/assistant/sessions')) {
+      return Response.json({ data: { session_id: 'aigc-1' } })
+    }
+    if (call.url.includes('/api/aigc/v3/assistant/sessions/') && call.url.endsWith('/completions')) {
+      return new Response('data: {"type":"text","data":"hi"}\n\ndata: {"type":"end"}\n\n', {
         headers: { 'content-type': 'text/event-stream' },
       })
     }
@@ -55,19 +64,31 @@ test('expert and client tasks send the right flags and then re-read the task lis
   })
   try {
     const result = await plugin.auth.checkin(async () => ({ cookie: COOKIE }))
-    const sessions = net.calls.filter((c) => c.url.endsWith('/cowork/sessions'))
-    assert.equal(sessions.length, 2)
-    assert.ok(sessions.some((c) => c.body.client_type === '365wps-lingxi-client'), '客户端任务要带 client_type')
-    assert.ok(sessions.some((c) => c.body.session_mode === 'expert'), '专家任务要带 session_mode=expert')
 
+    // 专家任务：aigc 平面，session_mode=expert + with_expert=true
+    const aigcSessions = net.calls.filter((c) => c.url.endsWith('/api/aigc/v3/assistant/sessions'))
+    assert.equal(aigcSessions.length, 1)
+    assert.equal(aigcSessions[0].body.session_mode, 'expert')
+    const aigcChats = net.calls.filter((c) => c.url.includes('/api/aigc/v3/assistant/sessions/') && c.url.endsWith('/completions'))
+    assert.equal(aigcChats.length, 1)
+    assert.equal(aigcChats[0].body.with_expert, true)
+
+    // 客户端任务：cowork 平面，client_type 三处（会话 / run / 请求头）
+    const sessions = net.calls.filter((c) => c.url.endsWith('/api/aioffice/v1/cowork/sessions'))
+    assert.equal(sessions.length, 1)
+    assert.equal(sessions[0].body.client_type, '365wps-lingxi-client')
     const runs = net.calls.filter((c) => c.url.endsWith('/api/public/v1/credits/runs'))
-    assert.equal(runs.length, 2)
-    assert.ok(runs.some((c) => c.body.agent_input.current_mode === 'expert'), '专家任务的 run 要带 current_mode=expert')
-    assert.ok(runs.some((c) => c.body.client_type === '365wps-lingxi-client'), '客户端任务的 run 要带 client_type')
+    assert.equal(runs.length, 1)
+    assert.equal(runs[0].body.client_type, '365wps-lingxi-client')
+    const chats = net.calls.filter((c) => c.url.endsWith('/api/public/v1/agent-runtime/chat/completions'))
+    assert.equal(chats.length, 1)
+    assert.equal(chats[0].headers['X-Client-Type'], '365wps-lingxi-client')
 
-    const chats = net.calls.filter((c) => c.url.endsWith('/agent-runtime/chat/completions'))
-    assert.equal(chats.length, 2)
-    assert.ok(chats.some((c) => c.headers['X-Client-Type'] === '365wps-lingxi-client'), '客户端对话要走客户端身份')
+    // 所有请求的 Cookie 都带客户端标识
+    for (const c of net.calls) {
+      const cookie = c.headers.Cookie || ''
+      assert.ok(cookie.includes('x-kso-app-name=win-lingxi-desktop'), `missing x-kso cookie: ${c.url}`)
+    }
 
     assert.equal(result.outcome, 'claimed')
     assert.equal(result.credit, 1000)

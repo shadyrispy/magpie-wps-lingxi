@@ -83,10 +83,11 @@ POST /api/public/v1/agent-runtime/chat/completions   # 对话（SSE，X-Cc-Sessi
 ## 3. 需要你验证的问题（按优先级）
 
 **Q1（最重要）**：账号任务未完成时，直接跑插件的签到，`try_group_chat` 会不会翻转？
-**Q2**：`try_expert_mode` 在带 `session_mode=expert` 的对话后会不会翻转？
-  （逆向结论：纯 HTTP 大概率**不会**翻——网关要求 WPS2 签名；仍值得实测一次以排除"agent-runtime 服务端代签"的可能）
-**Q3**：`use_lingxi_client` 在带 `client_type=365wps-lingxi-client` 的对话后会不会翻转？
-  （同上；若两者都不翻，唯一可行路径是 §5 的 app-server 方案）
+**Q2（0.3.9 新假设）**：专家任务改走**网页端同款 aigc 平面**
+  （`session_mode:"expert"` + `with_expert:true`）后会不会翻转？——这是渲染层专家模式的原样请求。
+**Q3（0.3.9 新假设）**：Cookie 里带 `x-kso-app-name=win-lingxi-desktop` 等设备头后，
+  `use_lingxi_client` 会不会翻转？——客户端 main 进程对所有 wps.cn 请求都这么注入。
+**Q4**：Q2/Q3 若都不翻，对话是否真实产生扣费（余额变化）？没有扣费=信号没到网关层。
 **Q4**（如果 Q2/Q3 失败）：抓一次**真实桌面客户端**完成该任务时的请求，看差异在哪（见 §6）。
 
 ---

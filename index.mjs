@@ -23,6 +23,18 @@ const AGENT_CHAT_PATH = "/api/public/v1/agent-runtime/chat/completions"
 const CLIENT_TYPE = "lingxi_claw"
 const CLIENT_LANG = "zh-CN"
 const RUN_TTL_MS = 60 * 60 * 1000
+// 客户端 main 进程会给所有 *.wps.cn 请求的 Cookie 追加 x-kso-* 设备头
+// （x-kso-app-name=win-lingxi-desktop 等）。服务端判断"是不是桌面客户端"很可能看它，
+// 我们照拼（不带需要 plussvr RSA 的 signature，先验证是否必需）。
+const DEVICE_ID = createHash("sha256").update("magpie-lingxi-device").digest("hex")
+const KSO_COOKIE_PARTS = [
+  "x-kso-app-name=win-lingxi-desktop",
+  "x-kso-app-version=1.3.31",
+  `x-kso-device-id=${DEVICE_ID}`,
+]
+function clientCookie(cookie) {
+  return cookie ? `${cookie}; ${KSO_COOKIE_PARTS.join("; ")}` : KSO_COOKIE_PARTS.join("; ")
+}
 // 15 天内到期 = 临时积分（与 jet 插件同一判据）；可用 MAGPIE_LINGXI_TEMP_DAYS 调整。
 const TEMP_CREDIT_WINDOW_MS =
   (Number(process.env.MAGPIE_LINGXI_TEMP_DAYS) > 0 ? Number(process.env.MAGPIE_LINGXI_TEMP_DAYS) : 15) * 24 * 60 * 60 * 1000
@@ -267,7 +279,7 @@ function envelopeError(payload) {
 }
 
 function basicHeaders(cookie, base = BASE) {
-  return { Cookie: cookie, "User-Agent": UA, Referer: `${base}/`, Accept: "application/json" }
+  return { Cookie: clientCookie(cookie), "User-Agent": UA, Referer: `${base}/`, Accept: "application/json" }
 }
 
 function resolveBase(auth) {
@@ -669,7 +681,7 @@ function requestId() {
 function agentHeaders(cookie, base, extra = {}) {
   const region = cookieRegion(cookie)
   return {
-    Cookie: cookie,
+    Cookie: clientCookie(cookie),
     "Content-Type": "application/json",
     "X-Client-Type": CLIENT_TYPE,
     "X-Client-Lang": CLIENT_LANG,
@@ -771,7 +783,7 @@ async function createCoworkSession(base, cookie, signal, extra = {}) {
     agent_version: 2,
     ...extra,
     env: {
-      device_id: createHash("sha256").update("magpie-lingxi-device").digest("hex"),
+      device_id: DEVICE_ID,
       device_name: userInfo().username || "magpie",
       work_space_dir: tmpdir(),
     },
@@ -1244,13 +1256,56 @@ async function deleteGroupChat(cookie, base, channelId) {
 //   · 专家任务：会话参数带 session_mode=expert，agent_input.current_mode=expert
 // 纯 HTTP 只能做到这些；是否算完成由服务端决定，所以调用方必须重拉任务看状态，
 // 不能假设成功（更不会伪造 claimed）。
+// 专家模式走网页端同款 aigc 平面：session_mode:"expert" 建会话 + with_expert:true 发对话。
+// 这是渲染层 `createSession(..., {session_mode:"expert"})` 的原样复刻，纯 HTTP。
+async function runExpertConversationViaAigc(cookie, base, text = "hi") {
+  const headers = {
+    Cookie: clientCookie(cookie),
+    "Content-Type": "application/json",
+    "X-Cc-Version": "1",
+    "X-Client-Type": "lingxi-web",
+    "X-Cc-Entrance": "default",
+    "User-Agent": UA,
+    Referer: `${base}/`,
+  }
+  const session = await fetch(`${base}/api/aigc/v3/assistant/sessions`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ session_mode: "expert" }),
+    signal: AbortSignal.timeout(30000),
+  })
+  if (!session.ok) return { ok: false, detail: `aigc 会话 HTTP ${session.status}` }
+  const sj = await session.json().catch(() => ({}))
+  const id = String(sj?.data?.session_id ?? "")
+  if (!id) return { ok: false, detail: "aigc 会话未返回 session_id" }
+
+  const payload = {
+    question: text,
+    expect_model: "plan_pro",
+    model: "plan_pro",
+    user_input: { text },
+    thinking: "auto",
+    with_mcp: false,
+    with_expert: true,
+  }
+  const res = await fetch(`${base}/api/aigc/v3/assistant/sessions/${id}/completions`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(120000),
+  })
+  const body = await res.text().catch(() => "")
+  if (!res.ok) return { ok: false, detail: `aigc 对话 HTTP ${res.status} ${body.slice(0, 120)}` }
+  return { ok: true, detail: "aigc 专家对话完成" }
+}
+
 async function runTaskConversation(cookie, base, { clientType, sessionMode, text }) {
-  const model = "qwen3.8_flash"
+  const model = "plan_pro" // 桌面端默认模型，账号目录里必有
   const body = {
     stream: false,
     model,
     messages: [{ role: "user", content: text || "hi" }],
-    max_tokens: 16,
+    max_tokens: 256,
   }
   const errorResponse = (message, status = 502, code = "upstream_error") => new Response(
     JSON.stringify({ error: { message, code } }),
@@ -1268,10 +1323,11 @@ async function runTaskConversation(cookie, base, { clientType, sessionMode, text
       sessionMode,
       currentMode: sessionMode === "expert" ? "expert" : undefined,
     })
-    await response.text().catch(() => "")
-    return response.ok
-  } catch {
-    return false
+    const text2 = await response.text().catch(() => "")
+    if (!response.ok) return { ok: false, detail: `HTTP ${response.status} ${text2.slice(0, 120)}` }
+    return { ok: true, detail: "对话完成" }
+  } catch (error) {
+    return { ok: false, detail: String(error?.message || error).slice(0, 140) }
   }
 }
 
@@ -1320,16 +1376,16 @@ async function completeOneTimeTasks(cookie, base, tasks) {
   const poor = bal !== null && bal <= 0
   if (poor && (needGroup || needExpert || needClient)) msg.push("余额不足，跳过需要消耗的任务")
 
-  // 客户端任务：用客户端身份跑一次最小对话（服务端按网关门判定）
+  // 客户端任务：cowork 平面 + 客户端身份（client_type 三处：会话/run/头）+ x-kso Cookie
   if (needClient && !poor) {
-    const ok = await runTaskConversation(cookie, base, { clientType: "365wps-lingxi-client", text: "hi" })
-    msg.push(ok ? "客户端对话 ✓" : "客户端对话失败")
+    const r = await runTaskConversation(cookie, base, { clientType: "365wps-lingxi-client", text: "hi" })
+    msg.push(r.ok ? "客户端对话 ✓" : `客户端对话失败(${r.detail || "?"})`)
   }
 
-  // 专家任务：会话标 expert + current_mode=expert
+  // 专家任务：网页端同款 aigc 平面（session_mode=expert + with_expert=true）
   if (needExpert && !poor) {
-    const ok = await runTaskConversation(cookie, base, { sessionMode: "expert", text: "hi" })
-    msg.push(ok ? "专家模式对话 ✓" : "专家模式对话失败")
+    const r = await runExpertConversationViaAigc(cookie, base, "hi")
+    msg.push(r.ok ? "专家模式对话 ✓" : `专家模式对话失败(${r.detail || "?"})`)
   }
 
   if (needGroup && !poor) {
