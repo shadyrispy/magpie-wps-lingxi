@@ -185,6 +185,19 @@ magpie accounts checkin
 
 ---
 
+## 🔧 环境变量（都有默认值）
+
+| 变量 | 作用 |
+|---|---|
+| `MAGPIE_LINGXI_BROWSER` | 登录用浏览器 exe（找不到浏览器时指定） |
+| `MAGPIE_LINGXI_HOME` | 灵犀客户端数据目录（导入账号自动扫描失败时指定） |
+| `MAGPIE_LINGXI_TEMP_DAYS` | 临时积分窗口天数（默认 15，与 jet 插件一致） |
+| `MAGPIE_LINGXI_NO_KSO` | 置 `1` 关闭客户端 Cookie 标识注入 |
+
+测试与验证：见 [`docs/TESTER-GUIDE.md`](./docs/TESTER-GUIDE.md)（安装 → 三级自测 → 回报模板）。
+
+---
+
 ## 🧭 参考源（本版取证）
 
 - 安装包：WPS 灵犀桌面端 **1.3.31**（`lingxi-desktop-1.3.31-setup.exe`）

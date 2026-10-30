@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.13 — 2026-10-31
+
+- 新增 `docs/TESTER-GUIDE.md`：测试者一站式指引（安装 → 三级自测 → 回报模板）。
+- README 补充环境变量表（BROWSER / HOME / TEMP_DAYS / NO_KSO）。
+
+## 0.3.12 — 2026-10-31
+
+- 流式与任务信号全面实测（真账号）：
+  - agent-runtime 流式单轮/带 system/tools/max_tokens/reasoning_effort 全部完整收流到 [DONE]；
+  - **服务端会话记录逐字段对比：纯 HTTP 的会话与真实客户端会话零差异** ——
+    信号层面插件已与客户端等价，任务翻转只差未领任务账号的最终验证。
+- `x-kso` Cookie 注入加逃生开关 `MAGPIE_LINGXI_NO_KSO=1`（默认仍注入）。
+- 内部函数导出（agentChat 等）便于联调；测试 31 条全绿。
+
 ## 0.3.11 — 2026-10-31
 
 三任务一条龙（真账号实测到建群这一步）：
