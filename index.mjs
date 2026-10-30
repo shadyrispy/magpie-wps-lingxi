@@ -1836,24 +1836,35 @@ export async function WPSLingxiAuthPlugin(input = {}, options = {}) {
         },
         {
           // 客户端已经登录过时最省事：直接读它的 Cookie 库，不弹浏览器、不重登。
-          type: "api",
+          // 用 oauth + opened:true 而不是 api：api 类型在 magpie 里就是「输入一个 key」，
+          // 即使没有 prompts 也会渲染输入框。这个方法是「点一下直接读本机客户端」。
+          type: "oauth",
           label: "导入本机灵犀客户端账号",
-          async authorize(inputs) {
-            const cred = await importLocalAccount(inputs?.dir || process.env.MAGPIE_LINGXI_HOME)
-            if (cred?.error) return { type: "failed", error: cred.error }
+          async authorize() {
+            const cred = await importLocalAccount(process.env.MAGPIE_LINGXI_HOME)
+            if (cred?.error) throw new Error(cred.error)
             return {
-              type: "success",
-              key: cred.sid,
-              cookie: cred.cookie,
-              accountId: cred.accountId,
-              metadata: {
-                sid: cred.sid,
-                uid: cred.uid,
-                cookieTail: cred.tail,
+              url: `${BASE}/`,
+              instructions: "已读取本机灵犀客户端登录态，无需输入任何内容",
+              method: "auto",
+              opened: true,
+              callback: async () => ({
+                type: "success",
+                access: cred.sid,
+                refresh: "",
+                // Cookie 约一年有效；没有刷新接口，真正的判据是上游 401。
+                expires: Date.now() + 360 * 24 * 3600 * 1000,
                 cookie: cred.cookie,
                 accountId: cred.accountId,
-                host: cred.host,
-              },
+                metadata: {
+                  sid: cred.sid,
+                  uid: cred.uid,
+                  cookieTail: cred.tail,
+                  cookie: cred.cookie,
+                  accountId: cred.accountId,
+                  host: cred.host,
+                },
+              }),
             }
           },
         },

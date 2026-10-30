@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.6 — 2026-10-31
+
+- 「导入本机灵犀客户端账号」从 api 类型改成 oauth（`opened: true`）：
+  api 方法在 magpie 里天然带一个 key 输入框（就是那个 `enter the key`），
+  改成 oauth 后点一下直接读客户端登录态，不再出现任何输入框。
+- 自动检测客户端目录（WPS 灵犀 / Lingxi / lingxi / lingxi-desktop），
+  失败才提示 `MAGPIE_LINGXI_HOME`。
+
 ## 0.3.5 — 2026-10-31
 
 - 浏览器发现按 magicrew 插件的实测列表重写（修 issue #1）：补上 360 极速浏览器 X
