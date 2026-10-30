@@ -1187,6 +1187,8 @@ async function claimTask(cookie, base, key, date) {
 // 没有已完成会话时这个任务做不了 —— 返回空串让调用方如实报告。
 async function pickGroupChatSession(cookie, base) {
   try {
+    // session_list 直接给 status（"finished" = 已完成），不用逐个查详情；
+    // 详情接口的字段名与它不同（session_status 数字），别混用。
     const response = await fetch(
       `${base}/api/public/v1/session_list?limit=30&exclude_agent=false&session_types=cowork_client&session_types=cowork_web&session_types=chat`,
       { headers: basicHeaders(cookie, base), signal: AbortSignal.timeout(20000) },
@@ -1196,16 +1198,8 @@ async function pickGroupChatSession(cookie, base) {
     const list = Array.isArray(payload?.data?.list) ? payload.data.list : []
     for (const session of list) {
       const id = String(session?.session_id ?? "")
-      if (!id) continue
-      try {
-        const detail = await fetch(`${base}/api/public/v1/sessions/${id}`, {
-          headers: basicHeaders(cookie, base),
-          signal: AbortSignal.timeout(15000),
-        })
-        if (!detail.ok) continue
-        const data = await detail.json().catch(() => ({}))
-        if (data?.data?.execution_status === "completed" || data?.data?.terminal_status === "completed") return id
-      } catch {}
+      const status = String(session?.status ?? "")
+      if (id && (status === "finished" || status === "completed")) return id
     }
     return ""
   } catch {
@@ -1314,7 +1308,7 @@ async function pickTaskModel(cookie, base) {
   return "deepseek-v4.1-flash"
 }
 
-async function runTaskConversation(cookie, base, { clientType, sessionMode, text } = {}) {
+async function runTaskConversation(cookie, base, { clientType, sessionMode, currentMode, text } = {}) {
   const model = await pickTaskModel(cookie, base)
   const body = {
     stream: false,
@@ -1327,22 +1321,55 @@ async function runTaskConversation(cookie, base, { clientType, sessionMode, text
     { status, headers: { "Content-Type": "application/json" } },
   )
   try {
-    const response = await agentChat({
-      cookie,
-      body,
-      stream: false,
-      requestedModel: model,
-      signal: AbortSignal.timeout(120000),
-      errorResponse,
-      clientType,
-      sessionMode,
-    })
+    const key = `${identityOf(cookie)}|${model}|${clientType || ""}|${sessionMode || ""}`
+    const sessionExtra = {
+      ...(clientType ? { client_type: clientType } : {}),
+      ...(sessionMode ? { session_mode: sessionMode } : {}),
+    }
+    const runExtra = {
+      ...(clientType ? { clientType } : {}),
+      ...(currentMode ? { currentMode } : {}),
+    }
+    const signal = AbortSignal.timeout(120000)
+    let run = await ensureRun(cookie, key, model, text || TASK_TEXT, signal, sessionExtra, runExtra)
+    let response
+    try {
+      response = await requestAgent(cookie, run, buildAgentBody(body, model), signal, clientType)
+    } catch (error) {
+      if (!looksLikeStaleRun(error.message)) throw error
+      runs.delete(key)
+      run = await ensureRun(cookie, key, model, text || TASK_TEXT, signal, sessionExtra, runExtra)
+      response = await requestAgent(cookie, run, buildAgentBody(body, model), signal, clientType)
+    }
     const text2 = await response.text().catch(() => "")
-    if (!response.ok) return { ok: false, detail: `HTTP ${response.status} ${text2.slice(0, 120)}` }
-    return { ok: true, detail: "对话完成" }
+    if (!response.ok) return { ok: false, sessionId: run.sessionId, detail: `HTTP ${response.status} ${text2.slice(0, 120)}` }
+    return { ok: true, sessionId: run.sessionId, detail: "对话完成" }
   } catch (error) {
-    return { ok: false, detail: String(error?.message || error).slice(0, 140) }
+    return { ok: false, sessionId: "", detail: String(error?.message || error).slice(0, 140) }
   }
+}
+
+// 轮询会话直到服务端把它标成 completed（建群的前置条件）
+async function waitSessionCompleted(cookie, base, sessionId, timeoutMs = 30000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      // 列表接口的 status（"finished"）是实测可靠字段；详情接口只有数字 session_status。
+      const d = await fetch(
+        `${base}/api/public/v1/session_list?limit=30&exclude_agent=false&session_types=cowork_client&session_types=cowork_web&session_types=chat`,
+        { headers: basicHeaders(cookie, base) },
+      )
+      if (d.ok) {
+        const j = await d.json().catch(() => ({}))
+        const list = Array.isArray(j?.data?.list) ? j.data.list : []
+        const hit = list.find((x) => String(x?.session_id ?? "") === sessionId)
+        const status = String(hit?.status ?? "")
+        if (status === "finished" || status === "completed") return true
+      }
+    } catch {}
+    await sleep(3000)
+  }
+  return false
 }
 
 // 昵称：GET /api/public/v1/account/profile → { data:{ id, name, corp_id } }。
@@ -1390,31 +1417,49 @@ async function completeOneTimeTasks(cookie, base, tasks) {
   const poor = bal !== null && bal <= 0
   if (poor && (needGroup || needExpert || needClient)) msg.push("余额不足，跳过需要消耗的任务")
 
-  // 客户端任务：cowork 平面 + 客户端身份（client_type 三处：会话/run/头）+ x-kso Cookie
-  if (needClient && !poor) {
-    const r = await runTaskConversation(cookie, base, { clientType: "lingxi_claw", text: TASK_TEXT })
-    msg.push(r.ok ? "客户端对话 ✓" : `客户端对话失败(${r.detail || "?"})`)
-  }
-
-  // 专家任务：网页端同款 aigc 平面（session_mode=expert + with_expert=true）
-  if (needExpert && !poor) {
-    const r = await runExpertConversationViaAigc(cookie, base)
-    msg.push(r.ok ? "专家模式对话 ✓" : `专家模式对话失败(${r.detail || "?"})`)
-  }
-
-  if (needGroup && !poor) {
-    const sid = await pickGroupChatSession(cookie, base)
-    if (sid) {
-      const group = await createGroupChatWith(cookie, base, sid)
-      if (group.ok) {
-        msg.push("建群 ✓")
-        await deleteGroupChat(cookie, base, group.channelId)
-      } else {
-        msg.push(`建群失败(${group.error || "?"})`)
+  // 一次对话同时命中两个任务：客户端身份（use_lingxi_client）+ 专家模式（try_expert_mode）。
+  let convSessionId = ""
+  if ((needClient || needExpert) && !poor) {
+    const r = await runTaskConversation(cookie, base, {
+      clientType: "lingxi_claw",
+      sessionMode: needExpert ? "expert" : undefined,
+      currentMode: needExpert ? "expert" : undefined,
+      text: TASK_TEXT,
+    })
+    convSessionId = r.sessionId || ""
+    if (r.ok) msg.push(needExpert ? "客户端+专家对话 ✓" : "客户端对话 ✓")
+    else {
+      msg.push(`客户端${needExpert ? "+专家" : ""}对话失败(${r.detail || "?"})`)
+      // 兜底：cowork 失败时，专家任务退到网页端同款 aigc 平面再试一次
+      if (needExpert) {
+        const a = await runExpertConversationViaAigc(cookie, base)
+        msg.push(a.ok ? "aigc 专家对话 ✓" : `aigc 专家对话失败(${a.detail || "?"})`)
       }
-    } else {
-      msg.push("建群失败（无可用会话）")
     }
+  }
+
+  // 群聊：优先用刚对话的会话（一次到位），不行就等它 completed，再不行扫历史会话
+  if (needGroup && !poor) {
+    let created = false
+    const tryCreate = async (sid) => {
+      const group = await createGroupChatWith(cookie, base, sid)
+      if (!group.ok) return false
+      msg.push("建群 ✓")
+      await deleteGroupChat(cookie, base, group.channelId)
+      return true
+    }
+    const convId = typeof convSessionId === "string" && convSessionId ? convSessionId : ""
+    if (convId) {
+      created = await tryCreate(convId)
+      if (!created && (await waitSessionCompleted(cookie, base, convId, 30000))) {
+        created = await tryCreate(convId)
+      }
+    }
+    if (!created) {
+      const sid = await pickGroupChatSession(cookie, base)
+      if (sid) created = await tryCreate(sid)
+    }
+    if (!created) msg.push("建群失败（无可用的已完成会话）")
   }
 
   // 重拉任务，领取所有 claimable（含刚被动作带出来的）
@@ -2029,6 +2074,8 @@ export const _internal = {
   summarizeExpiring,
   runExpertConversationViaAigc,
   runTaskConversation,
+  createGroupChatWith,
+  deleteGroupChat,
   agentChat,
   browserLogin,
   safariLogin,

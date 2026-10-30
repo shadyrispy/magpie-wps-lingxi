@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.11 — 2026-10-31
+
+三任务一条龙（真账号实测到建群这一步）：
+
+- **一次对话吃两任务**：`client_type=lingxi_claw` + `session_mode/current_mode=expert`
+  的 cowork 对话同时命中「使用灵犀客户端」和「完整体验专家模式」；
+  cowork 失败时专家任务退到 aigc 平面兜底。
+- **建群直接复用这次对话的会话**（不再先扫历史）：失败则轮询会话状态 30s 再试，
+  最后才扫历史会话。轮询字段修正为 session_list 的 `status:"finished"`
+  （详情接口只有数字 `session_status`，之前参照 PR #5 的 `execution_status` 已不存在）。
+- 真账号全链路实测：对话 ✓ → 建群 400。
+  建群 400 与会话状态无关（真实客户端的历史会话同样 400），
+  当前主假设：`try_group_chat` 已 claimed 的账号被服务端关闭建群通道
+  （渲染层即有 `groupChatEnabled` 门控），需未领任务账号验证。
+- 会话状态字段修正：`session_list` 直接返回 `status:"finished"`，不再逐个查详情。
+
 ## 0.3.10 — 2026-10-31
 
 真账号实测修正（两条信号链现已端到端跑通）：

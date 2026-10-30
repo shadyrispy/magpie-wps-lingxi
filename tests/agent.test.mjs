@@ -263,7 +263,7 @@ test('a group_chat one-time task is completed by creating and deleting a channel
     }
     if (call.url.includes('/api/public/v1/credits/balance')) return Response.json({ data: { total_balance: 500 } })
     if (call.url.includes('/api/public/v1/session_list')) {
-      return Response.json({ result: 'ok', data: { list: [{ session_id: 'done-1' }, { session_id: 'running-1' }] } })
+      return Response.json({ result: 'ok', data: { list: [{ session_id: 'done-1', status: 'finished' }, { session_id: 'running-1', status: 'running' }] } })
     }
     if (call.url.endsWith('/api/public/v1/sessions/done-1')) {
       return Response.json({ data: { execution_status: 'completed' } })

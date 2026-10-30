@@ -34,6 +34,7 @@ test('expert (aigc) and client (cowork) attempts send the right flags; cookies c
           tasks: [
             { task_key: 'daily_check_in', type: 'daily', status: 'claimed', reward_amount: 100, extra: { consecutive_days: 1 } },
             { task_key: 'try_expert_mode', type: 'one_time', status: done ? 'claimable' : 'incomplete', action: 'expert_mode', reward_amount: 200 },
+            { task_key: 'try_group_chat', type: 'one_time', status: done ? 'claimable' : 'incomplete', action: 'group_chat', reward_amount: 400 },
             { task_key: 'use_lingxi_client', type: 'one_time', status: done ? 'claimable' : 'incomplete', action: 'download_client', reward_amount: 800 },
           ],
         },
@@ -55,37 +56,45 @@ test('expert (aigc) and client (cowork) attempts send the right flags; cookies c
         headers: { 'content-type': 'text/event-stream' },
       })
     }
+    if (call.url.endsWith('/api/imchat/v1/channels') && call.method === 'POST') {
+      return Response.json({ code: 'Success', data: { channel_id: 'ch-1' } })
+    }
+    if (call.url.endsWith('/api/imchat/v1/channels/ch-1') && call.method === 'DELETE') {
+      return Response.json({ code: 'Success', data: {} })
+    }
     if (call.url.includes('/claim')) {
-      const key = call.url.includes('try_expert_mode') ? 'try_expert_mode' : 'use_lingxi_client'
-      const reward = key === 'try_expert_mode' ? 200 : 800
-      return Response.json({ result: 'ok', data: { reward_amount: reward } })
+      const rewards = { try_expert_mode: 200, try_group_chat: 400, use_lingxi_client: 800 }
+      const key = Object.keys(rewards).find((k) => call.url.includes(k)) || ''
+      return Response.json({ result: 'ok', data: { reward_amount: rewards[key] || 0 } })
     }
     return new Response('not found', { status: 404 })
   })
   try {
     const result = await plugin.auth.checkin(async () => ({ cookie: COOKIE }))
 
-    // 专家任务：aigc 平面，session_mode=expert + with_expert=true
-    const aigcSessions = net.calls.filter((c) => c.url.endsWith('/api/aigc/v3/assistant/sessions'))
-    assert.equal(aigcSessions.length, 1)
-    assert.equal(aigcSessions[0].body.session_mode, 'expert')
-    const aigcChats = net.calls.filter((c) => c.url.includes('/api/aigc/v3/assistant/sessions/') && c.url.endsWith('/completions'))
-    assert.equal(aigcChats.length, 1)
-    assert.equal(aigcChats[0].body.with_expert, true)
-    assert.equal(aigcChats[0].body.expect_model, 'plan_pro')
-
-    // 客户端任务：cowork 平面，client_type 用白名单值 lingxi_claw（服务端自己映射成
-    // Product-Name=365wps-lingxi-client；直接发 Product-Name 会被风控拒）
+    // 一次对话吃两个任务：客户端身份 + 专家模式（session/run 双标志）
     const sessions = net.calls.filter((c) => c.url.endsWith('/api/aioffice/v1/cowork/sessions'))
     assert.equal(sessions.length, 1)
     assert.equal(sessions[0].body.client_type, 'lingxi_claw')
+    assert.equal(sessions[0].body.session_mode, 'expert')
     const runs = net.calls.filter((c) => c.url.endsWith('/api/public/v1/credits/runs'))
     assert.equal(runs.length, 1)
     assert.equal(runs[0].body.client_type, 'lingxi_claw')
+    assert.equal(runs[0].body.agent_input.current_mode, 'expert')
     const chats = net.calls.filter((c) => c.url.endsWith('/api/public/v1/agent-runtime/chat/completions'))
     assert.equal(chats.length, 1)
     assert.equal(chats[0].headers['X-Client-Type'], 'lingxi_claw')
     assert.ok(!JSON.stringify(net.calls.map((c) => c.body)).includes('365wps-lingxi-client'), 'Product-Name 不该出现在请求体里')
+
+    // aigc 平面只是兜底：cowork 成功就不该出现
+    assert.equal(net.calls.filter((c) => c.url.includes('/api/aigc/v3/')).length, 0)
+
+    // 群聊：直接复用这次对话的会话建群（不扫历史）
+    const channels = net.calls.filter((c) => c.url.endsWith('/api/imchat/v1/channels') && c.method === 'POST')
+    assert.equal(channels.length, 1)
+    assert.equal(channels[0].body.session_id, 's1')
+    assert.ok(net.calls.some((c) => c.url.endsWith('/api/imchat/v1/channels/ch-1') && c.method === 'DELETE'))
+    assert.ok(!net.calls.some((c) => c.url.includes('/api/public/v1/session_list')), '首轮建群成功就不该去扫历史会话')
 
     // 所有请求的 Cookie 都带客户端标识
     for (const c of net.calls) {
@@ -94,7 +103,7 @@ test('expert (aigc) and client (cowork) attempts send the right flags; cookies c
     }
 
     assert.equal(result.outcome, 'claimed')
-    assert.equal(result.credit, 1000)
+    assert.equal(result.credit, 1400)
   } finally {
     net.restore()
   }

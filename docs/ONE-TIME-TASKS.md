@@ -78,6 +78,14 @@ POST /api/public/v1/tasks/{task_key}/claim         # 领奖（空 body，可选 
 2. cowork 平面对话文案用裸词（"hi"）会被风控拒（AuditFailed）；
    aigc 平面不受影响。用一句正常的话即可。
 
+### 2.38 建群实测结论（0.3.11，2026-10-31）
+- 纯 HTTP 的 cowork 会话跑完后，`session_list` 里 `status` 会变成 `"finished"`
+  （详情接口字段是数字 `session_status`，没有 `execution_status` —— PR #5 时代的字段名已变）。
+- `POST /api/imchat/v1/channels` body `{session_id, expect_model:"plan_pro"}`
+  （与渲染层 `createChannel({session_id, expect_model})` 一致）在**已领完群聊任务的账号**上
+  对任何会话（包括真实客户端的历史会话）都返回 400 InvalidArgument。
+  主假设：任务 claimed 后服务端关闭建群通道 → **建群验证必须用未领任务账号**。
+
 ### 2.4 插件走的通路
 ```
 POST /api/aioffice/v1/cowork/sessions      # 建会话（可带 client_type / session_mode）
