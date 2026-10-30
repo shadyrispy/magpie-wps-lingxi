@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.8 — 2026-10-31
+
+- 修 #2：专家任务的 `credits/runs` 现在带 `agent_input.current_mode=expert`
+  （之前写死 `"agent"`，与注释不符）；客户端任务的 run 体也带
+  `client_type=365wps-lingxi-client`。测试锁住 run 体。
+- 修 #3：新增 `auth.refresh` 钩子做账号迁移 —— 0.3.7 之前建的旧账号
+  （accountId 是固定串「WPS 灵犀账户」）会在下次刷新时改成 `wps-<uid>`
+  并补上 `metadata.uid/name`；额度面板的账号名优先显示昵称
+  （`GET /api/public/v1/account/profile`，1 小时缓存）。
+  没有手机号可拿（上游不回），`accountId` 保持 `wps-<uid>` 作稳定键。
+- 31 条测试全绿。
+
 ## 0.3.7 — 2026-10-31
 
 - 审计修复：

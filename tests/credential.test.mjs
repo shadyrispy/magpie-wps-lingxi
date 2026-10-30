@@ -51,3 +51,28 @@ test('normalization keeps wps_sid and uid for the account slot', () => {
   assert.equal(cred.accountId, 'wps-9')
   assert.ok(_internal.normalizeCredential('').error)
 })
+
+test('refresh migrates legacy accounts and attaches the profile name', async () => {
+  const plugin = await WPSLingxiAuthPlugin()
+  const original = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    if (String(url).includes('/api/public/v1/account/profile')) {
+      return Response.json({ data: { id: '289160871', name: 'Forsaken', corp_id: '0' } })
+    }
+    return new Response('not found', { status: 404 })
+  }
+  try {
+    const sid = 'S' + 'i'.repeat(40)
+    const merged = await plugin.auth.refresh({
+      cookie: `wps_sid=${sid}`,
+      accountId: 'WPS 灵犀账户',
+      metadata: {},
+    })
+    assert.equal(merged.accountId, 'wps-289160871')
+    assert.equal(merged.metadata.uid, '289160871')
+    assert.equal(merged.metadata.name, 'Forsaken')
+    assert.equal(merged.metadata.sid, sid)
+  } finally {
+    globalThis.fetch = original
+  }
+})

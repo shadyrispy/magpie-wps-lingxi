@@ -781,12 +781,13 @@ async function createCoworkSession(base, cookie, signal, extra = {}) {
   return id
 }
 
-async function createCreditsRun(base, cookie, sessionId, model, title, signal) {
+async function createCreditsRun(base, cookie, sessionId, model, title, signal, { currentMode, clientType } = {}) {
   const payload = await postJson(`${base}${AGENT_RUNS_PATH}`, cookie, base, {
     client_request_id: String(Date.now()),
     session_id: sessionId,
     model_provider: "lingxi",
     model_id: model,
+    ...(clientType ? { client_type: clientType } : {}),
     agent_input: {
       text: title,
       files: [],
@@ -794,7 +795,7 @@ async function createCreditsRun(base, cookie, sessionId, model, title, signal) {
       expect_model: model,
       refs: [],
       permission_mode: "default",
-      current_mode: "agent",
+      current_mode: currentMode || "agent",
       browser_plugin_enabled: false,
     },
   }, signal)
@@ -803,7 +804,7 @@ async function createCreditsRun(base, cookie, sessionId, model, title, signal) {
   return id
 }
 
-async function ensureRun(cookie, key, model, title, signal, extra = {}) {
+async function ensureRun(cookie, key, model, title, signal, extra = {}, runExtra = {}) {
   const hit = runs.get(key)
   if (hit && Date.now() - hit.at < RUN_TTL_MS) return hit
   let lastError
@@ -811,7 +812,7 @@ async function ensureRun(cookie, key, model, title, signal, extra = {}) {
   for (const base of [BASE, KDOCS_BASE]) {
     try {
       const sessionId = await createCoworkSession(base, cookie, signal, extra)
-      const runId = await createCreditsRun(base, cookie, sessionId, model, title, signal)
+      const runId = await createCreditsRun(base, cookie, sessionId, model, title, signal, runExtra)
       const run = { base, sessionId, runId, at: Date.now() }
       runs.set(key, run)
       return run
@@ -1050,14 +1051,18 @@ async function agentChat({ cookie, body, stream, requestedModel, signal, errorRe
     ...(clientType ? { client_type: clientType } : {}),
     ...(sessionMode ? { session_mode: sessionMode } : {}),
   }
-  let run = await ensureRun(cookie, key, requestedModel, lastUserText(body), signal, sessionExtra)
+  const runExtra = {
+    ...(clientType ? { clientType } : {}),
+    ...(sessionMode === "expert" ? { currentMode: "expert" } : {}),
+  }
+  let run = await ensureRun(cookie, key, requestedModel, lastUserText(body), signal, sessionExtra, runExtra)
   let response
   try {
     response = await requestAgent(cookie, run, payload, signal, clientType)
   } catch (error) {
     if (!looksLikeStaleRun(error.message)) throw error
     runs.delete(key)
-    run = await ensureRun(cookie, key, requestedModel, lastUserText(body), signal, sessionExtra)
+    run = await ensureRun(cookie, key, requestedModel, lastUserText(body), signal, sessionExtra, runExtra)
     response = await requestAgent(cookie, run, payload, signal, clientType)
   }
 
@@ -1261,11 +1266,35 @@ async function runTaskConversation(cookie, base, { clientType, sessionMode, text
       errorResponse,
       clientType,
       sessionMode,
+      currentMode: sessionMode === "expert" ? "expert" : undefined,
     })
     await response.text().catch(() => "")
     return response.ok
   } catch {
     return false
+  }
+}
+
+// 昵称：GET /api/public/v1/account/profile → { data:{ id, name, corp_id } }。
+// 只有这一个端点回昵称（issue #3 实测：user/info 等全是 404），没有手机号。
+const profileCache = new Map()
+
+async function fetchProfile(cookie, base = BASE) {
+  const sid = extractSid(cookie)
+  const hit = profileCache.get(sid)
+  if (hit && Date.now() - hit.at < 60 * 60 * 1000) return hit.value
+  try {
+    const res = await fetch(`${base}/api/public/v1/account/profile`, { headers: basicHeaders(cookie, base) })
+    if (!res.ok) return {}
+    const json = await res.json().catch(() => ({}))
+    const value = {
+      id: String(json?.data?.id ?? ""),
+      name: String(json?.data?.name ?? "").trim(),
+    }
+    profileCache.set(sid, { at: Date.now(), value })
+    return value
+  } catch {
+    return {}
   }
 }
 
@@ -1659,6 +1688,26 @@ export async function WPSLingxiAuthPlugin(input = {}, options = {}) {
         }
       },
 
+      // 1.5 账号迁移：0.3.7 之前建的账号 accountId 是固定串「WPS 灵犀账户」，
+      // refresh 的返回值会合并进账号记录，这里借它把旧记录改成 wps-<uid> 并补上昵称。
+      async refresh(auth) {
+        const cookie = resolveCookie(auth)
+        if (!cookie) return {}
+        const base = resolveBase(auth)
+        const sid = extractSid(cookie)
+        const profile = await fetchProfile(cookie, base).catch(() => ({}))
+        const uid = auth.metadata?.uid || extractUid(cookie) || profile.id || ""
+        const accountId = uid ? `wps-${uid}` : sid ? `wps-${sid.slice(-8)}` : undefined
+        const metadata = { ...(auth.metadata || {}) }
+        if (sid) metadata.sid = metadata.sid || sid
+        if (uid) metadata.uid = uid
+        if (profile.name) metadata.name = profile.name
+        if (accountId) metadata.accountId = accountId
+        const out = { metadata }
+        if (accountId && auth.accountId !== accountId) out.accountId = accountId
+        return out
+      },
+
       // 2. 用量与智点额度查询 (对齐 Magpie 的 balance 和 until 规范)
       async usage(getAuth) {
         const auth = await getAuth()
@@ -1669,6 +1718,7 @@ export async function WPSLingxiAuthPlugin(input = {}, options = {}) {
 
         try {
           const base = resolveBase(auth)
+          const profile = await fetchProfile(cookie, base).catch(() => ({}))
           const res = await fetch(`${base}/api/public/v1/credits/balance`, { headers: basicHeaders(cookie, base) })
 
           if (res.status === 401 || res.status === 403) {
@@ -1734,7 +1784,7 @@ export async function WPSLingxiAuthPlugin(input = {}, options = {}) {
 
           return {
             plan: "WPS 灵犀",
-            user: auth.accountId || "WPS 账户",
+            user: profile?.name || auth.accountId || "WPS 账户",
             balance: `${totalBalance.toLocaleString()} 智点`,
             windows,
             until: toIso(earliestExpire),

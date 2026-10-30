@@ -60,6 +60,11 @@ test('expert and client tasks send the right flags and then re-read the task lis
     assert.ok(sessions.some((c) => c.body.client_type === '365wps-lingxi-client'), '客户端任务要带 client_type')
     assert.ok(sessions.some((c) => c.body.session_mode === 'expert'), '专家任务要带 session_mode=expert')
 
+    const runs = net.calls.filter((c) => c.url.endsWith('/api/public/v1/credits/runs'))
+    assert.equal(runs.length, 2)
+    assert.ok(runs.some((c) => c.body.agent_input.current_mode === 'expert'), '专家任务的 run 要带 current_mode=expert')
+    assert.ok(runs.some((c) => c.body.client_type === '365wps-lingxi-client'), '客户端任务的 run 要带 client_type')
+
     const chats = net.calls.filter((c) => c.url.endsWith('/agent-runtime/chat/completions'))
     assert.equal(chats.length, 2)
     assert.ok(chats.some((c) => c.headers['X-Client-Type'] === '365wps-lingxi-client'), '客户端对话要走客户端身份')
