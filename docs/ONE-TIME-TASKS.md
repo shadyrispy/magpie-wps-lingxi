@@ -30,7 +30,35 @@ POST /api/public/v1/tasks/{task_key}/claim         # 领奖（空 body，可选 
 响应：`{ result:"ok", data:{ tasks:[...], total_claimed_credits } }`
 任务对象：`task_key`、`type`（`daily` / `one_time`）、`status`（`incomplete` / `claimable` / `claimed`）、`action`、`reward_amount`。
 
-### 2.2 模型对话走 AI Gateway，需要运行时签名
+### 2.2 模型对话走 AI Gateway，需要运行时签名（决定性证据）
+
+对 app-server 5.15.0 的完整逆向（pclntab + capstone，函数级）得到：
+
+**client_type → 网关 Product-Name 映射表**（`core.map.init.0`，全局 map，22 条）：
+
+| 会话 client_type | Product-Name |
+|---|---|
+| `lingxi_claw` / `wps_separate` | **365wps-lingxi-client** |
+| `lingxi_ios` / `lingxi_android`（含 `_remote`） | 365wps-lingxi-mobile |
+| `wechat_mp` | 365wps-lingxi-miniprogram |
+| 其余 16 个（pc_web、pc_wps、web_copilot 等） | 365wps-lingxi-web |
+
+**Intention-Code 由 6 字节 mode 串决定**（`BuildGatewayParameters`，三处独立实现一致）：
+- `current_mode == "expert"` → `AI-Gateway-Intention-Code: 365wps_lingxi_expert`
+- 其他（normal）→ `365wps_lingxi_normal`
+
+**计费身份 = 会话的 client_type**（`BillingRunFactory.Create` → `billingClientType`，
+13 个白名单值直通，否则归一化；白名单含 lingxi_claw、wps_separate 等）。
+
+**纯 HTTP 无法复现的**：WPS2 请求签名（`httputil.NewWPS2Signer`，只对
+`/api/public/v1/agent-runtime/`、`/api/logs/v1/app-server/*` 前缀生效）与
+`AI-Gateway-Billing-Token`（计费流产物）。这就是明文 Cookie 打网关 403 的原因。
+
+**客户端不存在任何「任务完成上报」端点**（渲染层与二进制均证实，`task_ids`
+只是 agent 内部工具字段）。任务状态机由服务端依据**网关计费侧信号**判定。
+
+> 结论：不跑 app-server、不打网关的纯 HTTP，无法让 `try_expert_mode` /
+> `use_lingxi_client` 翻转。可行路径见 §5。
 - 网关：`https://ai-gateway.wps.cn`，路径 `/api/v3/responses`、`/api/v3/chat/completions`
 - 关键头：`AI-Gateway-Product-Name`（取值含 `365wps-lingxi-client`、`365wps_lingxi_expert`）、
   `AI-Gateway-Intention-Code`、`AI-Gateway-Billing-Token`、`AI-Gateway-Uid`、`Client-Request-Id`
@@ -56,7 +84,9 @@ POST /api/public/v1/agent-runtime/chat/completions   # 对话（SSE，X-Cc-Sessi
 
 **Q1（最重要）**：账号任务未完成时，直接跑插件的签到，`try_group_chat` 会不会翻转？
 **Q2**：`try_expert_mode` 在带 `session_mode=expert` 的对话后会不会翻转？
+  （逆向结论：纯 HTTP 大概率**不会**翻——网关要求 WPS2 签名；仍值得实测一次以排除"agent-runtime 服务端代签"的可能）
 **Q3**：`use_lingxi_client` 在带 `client_type=365wps-lingxi-client` 的对话后会不会翻转？
+  （同上；若两者都不翻，唯一可行路径是 §5 的 app-server 方案）
 **Q4**（如果 Q2/Q3 失败）：抓一次**真实桌面客户端**完成该任务时的请求，看差异在哪（见 §6）。
 
 ---
@@ -139,7 +169,23 @@ daily_check_in           ______        ______        ______
 
 ---
 
-## 8. 代码位置（方便对照）
+## 8. 备选方案：官方 app-server（如果 Q2/Q3 都不翻）
+
+上游 PR #5 的做法，插件按需从官方 CDN 拉起客户端内核（约 90MB，Windows），用 stdio JSON-RPC 跑一次对话：
+```
+GET /api/aioffice/v1/cowork/app-server/versions   # 公开，无鉴权，返回 { download_url, hash }
+下载 zip → sha256 校验 → 解压 service/lingxi.exe
+lingxi.exe -stdin -auth-file <{auth_mode:"wps_sid",wps_sid:{value:<sid>}}> -client-type lingxi_claw
+initialize → initialized(notify) → account/login/start → session/start → run/start("hi")
+```
+- app-server 自带 WPS2 签名与凭据，等价于真实客户端 → 网关信号成立
+- 普通对话 → `use_lingxi_client`；`session_mode:"expert"` 的 run → `try_expert_mode`
+- 之后轮询 tasks 接口（纯 HTTP 即可）领取
+- 代价：90MB 下载、Windows-only、每任务约 1 智点
+
+---
+
+## 9. 代码位置（方便对照）
 
 | 逻辑 | 文件 / 函数 |
 |---|---|
