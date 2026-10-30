@@ -11,9 +11,13 @@ jobs:
         with:
           node-version: '22'
       - run: node --check index.mjs
+<<<<<<< HEAD
       - run: node --test review.test.mjs
       - run: node --test tools.test.mjs
       - run: node --test prompt.test.mjs
       - run: node --test native.test.mjs
       - run: node --test native-mode.test.mjs
+=======
+      - run: node --test agent.test.mjs review.test.mjs
+>>>>>>> origin/pr/5
 
