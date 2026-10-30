@@ -43,9 +43,9 @@ Claude Code、Codex、Cursor 等任何支持 OpenAI 格式的客户端。
 - 🔄 **模型目录 (`provider.models`)**  
   只读客户端自己的 `GET /api/aioffice/v1/sessions/plans`（`plans` + `models`，带倍率与推理档位）；
   未登录时用手指量的快照，不假装实时。
-- 🔑 **Cookie 归一 + 多账号**  
-  支持裸 `wps_sid`、`wps_sid=…`、整段 `Cookie: wps_sid=…; uid=…`；只保留 `wps_sid` 与 `uid`，
-  按 `uid` 区分账号，第二个账号不会覆盖第一个。
+- 🔑 **账号导入 + 多账号**  
+  浏览器登录会自己抓会话；也可以直接导入本机灵犀客户端的登录态（Windows，读客户端 Cookie 库）。
+  凭据只保留 `wps_sid` 与 `uid`，按 `uid` 区分账号，第二个账号不会覆盖第一个。
 
 ---
 
@@ -132,10 +132,12 @@ magpie plugin login wps-lingxi
 
 或在 Magpie 桌面客户端的 Provider 面板点 **Login**：
 
-1. **浏览器登录（推荐）**：插件打开独立浏览器窗口，正常登录 WPS 后自动读取 `wps_sid`，不需要复制任何东西
-   （需要 Chrome / Edge / Chromium / Brave；Safari 的自动化窗口会锁键盘且读不到已有登录态）。
-2. **手动粘贴**：打开 [lingxi.wps.cn](https://lingxi.wps.cn/) 登录，`F12` → Application → Cookies，
-   复制 `wps_sid`，或整段 Cookie（插件只取 `wps_sid` 与 `uid`）。
+1. **浏览器登录（默认）**：插件直接打开 WPS 登录页（`https://lingxi.wps.cn/`），你在浏览器里正常登录，
+   登录成功后插件自己读取会话并保存账号 —— **不弹本地页面、不复制 Cookie、不需要任何粘贴**。
+   支持任意 Chromium 内核浏览器：Chrome / Edge / Brave / Vivaldi / 360极速 / 360安全 / QQ / 搜狗；
+   找不到时可用 `MAGPIE_LINGXI_BROWSER` 指定浏览器 exe（360 安全浏览器可能不支持调试端口，建议 360极速）。
+2. **导入本机灵犀客户端账号**：已经在灵犀客户端登录过时，点这一项直接读客户端本地会话，
+   不打开浏览器、不用重新登录（Windows；用 DPAPI + AES-GCM 解密客户端 Cookie 库）。
 
 多账号：凭据按 `uid` 区分（没有 `uid` 时按 `wps_sid` 尾部），界面显示尾号 4 位。
 

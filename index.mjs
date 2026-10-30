@@ -3,11 +3,11 @@
 // 同时提供每日签到、智点额度与客户端模型目录；不再使用网页端通路。
 
 import { createServer } from "node:http"
-import { createHash } from "node:crypto"
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { createDecipheriv, createHash } from "node:crypto"
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs"
 import { join } from "node:path"
-import { tmpdir, userInfo } from "node:os"
-import { exec, spawn } from "node:child_process"
+import { homedir, tmpdir, userInfo } from "node:os"
+import { exec, execFileSync, spawn } from "node:child_process"
 
 const PROVIDER = "wps-lingxi"
 // 只走桌面端（灵犀 1.3.31 安装包）的那一条通路，不再有网页平面：
@@ -180,10 +180,6 @@ function identityOf(text) {
 
 const cookieTail = (sid) => String(sid).slice(-4)
 
-const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (char) => (
-  { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]
-))
-
 // 账号的会话凭据统一从 parseCookieInput 归一：保留 wps_sid 与 uid（多账号靠 uid 区分），
 // 其余键（kso_sid / rtk / lang…）不需要，也不该发给上游。
 function resolveCookie(auth) {
@@ -261,30 +257,93 @@ function which(name) {
   return ""
 }
 
-function findBrowser() {
+// 任意 Chromium 内核浏览器都能用（CDP 读 Cookie），不止 Chrome/Edge。
+// 国内常见的 360/QQ/搜狗 也走这条路；360 安全浏览器可能吞掉调试参数，失败时给明确提示。
+const WIN_BROWSER_RELATIVE = [
+  ["Google", "Chrome", "Application", "chrome.exe"],
+  ["Microsoft", "Edge", "Application", "msedge.exe"],
+  ["BraveSoftware", "Brave-Browser", "Application", "brave.exe"],
+  ["Chromium", "Application", "chrome.exe"],
+  ["Vivaldi", "Application", "vivaldi.exe"],
+  ["360Chrome", "Chrome", "Application", "360chrome.exe"],
+  ["360", "360Chrome", "Chrome", "Application", "360chrome.exe"],
+  ["360se6", "Application", "360se6.exe"],
+  ["360", "360se6", "Application", "360se6.exe"],
+  ["Tencent", "QQBrowser", "Application", "QQBrowser.exe"],
+  ["SogouExplorer", "SogouExplorer.exe"],
+]
+
+const WIN_REGISTRY_BROWSERS = [
+  "chrome.exe",
+  "msedge.exe",
+  "360chrome.exe",
+  "360se6.exe",
+  "QQBrowser.exe",
+  "brave.exe",
+  "vivaldi.exe",
+  "opera.exe",
+  "SogouExplorer.exe",
+]
+
+function registryAppPath(exe) {
+  const roots = ["HKCU", "HKLM"]
+  const tails = [
+    `SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\${exe}`,
+    `SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\${exe}`,
+  ]
+  for (const root of roots) {
+    for (const tail of tails) {
+      try {
+        const out = execFileSync("reg", ["query", root + "\\" + tail, "/ve"], {
+          encoding: "utf8",
+          timeout: 3000,
+          windowsHide: true,
+          stdio: ["ignore", "pipe", "ignore"],
+        })
+        const match = /REG_SZ\s+(.+?)\s*$/m.exec(out)
+        const file = match?.[1]?.trim().replace(/^"|"$/g, "")
+        if (file && existsSync(file)) return file
+      } catch {}
+    }
+  }
+  return ""
+}
+
+// 纯函数方便单测：环境变量优先，其次注册表，最后常见安装目录。
+function browserCandidates(platform = process.platform, env = process.env, lookup = registryAppPath) {
   const candidates = []
-  if (process.platform === "darwin") {
+  const override = String(env.MAGPIE_LINGXI_BROWSER || "").trim()
+  if (override) candidates.push(override)
+
+  if (platform === "darwin") {
     candidates.push(
       "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
       "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
       "/Applications/Chromium.app/Contents/MacOS/Chromium",
       "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+      "/Applications/Vivaldi.app/Contents/MacOS/Vivaldi",
+      "/Applications/QQ浏览器.app/Contents/MacOS/QQBrowser",
     )
-  } else if (process.platform === "win32") {
-    const roots = [process.env.PROGRAMFILES, process.env["PROGRAMFILES(X86)"], process.env.LOCALAPPDATA].filter(Boolean)
+  } else if (platform === "win32") {
+    for (const exe of WIN_REGISTRY_BROWSERS) {
+      const found = lookup(exe)
+      if (found) candidates.push(found)
+    }
+    const roots = [env.PROGRAMFILES, env["PROGRAMFILES(X86)"], env.LOCALAPPDATA].filter(Boolean)
     for (const root of roots) {
-      candidates.push(
-        join(root, "Google", "Chrome", "Application", "chrome.exe"),
-        join(root, "Microsoft", "Edge", "Application", "msedge.exe"),
-      )
+      for (const parts of WIN_BROWSER_RELATIVE) candidates.push(join(root, ...parts))
     }
   } else {
-    for (const name of ["google-chrome", "chromium", "chromium-browser", "microsoft-edge"]) {
+    for (const name of ["google-chrome", "chromium", "chromium-browser", "microsoft-edge", "brave-browser", "vivaldi"]) {
       const found = which(name)
       if (found) candidates.push(found)
     }
   }
-  return candidates.find((file) => existsSync(file)) || ""
+  return [...new Set(candidates)]
+}
+
+function findBrowser() {
+  return browserCandidates().find((file) => existsSync(file)) || ""
 }
 
 async function waitForFile(file, timeoutMs) {
@@ -495,7 +554,11 @@ async function browserLogin({ url, timeoutMs = 5 * 60 * 1000, signal }) {
   // Safari 的 WebDriver 窗口在自动化期间会锁住键盘，用户没法手动输入；
   // 而且它用的是临时配置，读不到现有登录态 —— 自动登录这条路对 Safari 不成立。
   // 需要自动登录请装 Chrome / Edge；否则用页面的手动粘贴。
-  throw new Error("没有找到 Chrome / Edge / Chromium；Safari 的自动化窗口不允许手动输入，请用下方手动粘贴 Cookie，或安装 Chrome/Edge")
+  throw new Error(
+    "没有找到 Chromium 内核浏览器（Chrome / Edge / 360极速 / QQ / Brave 等）。" +
+    "任一都可：装一个，或用 MAGPIE_LINGXI_BROWSER 指向它的 exe；也可以直接在下方粘贴 Cookie。" +
+    "360 安全浏览器可能不支持调试端口，建议 360极速或 Chrome/Edge"
+  )
 }
 
 // 与客户端 app-server 发出的请求头一致（安装包 1.3.31 取证）：
@@ -1193,6 +1256,134 @@ async function fetchModelPlans(cookie, base = BASE) {
   }
 }
 
+// ── 导入本机灵犀客户端账号 ───────────────────────────────────────────
+// 客户端把会话 Cookie 放在 Electron 的 persist 分区里：
+//   %APPDATA%\WPS 灵犀\Partitions\<分区>\Network\Cookies
+// 值是 Chromium OSCrypt v10（AES-256-GCM），key 由 DPAPI 包在 Local State；
+// 2026-10 实测明文前 32 字节是 host 哈希，真正的值从第 33 字节开始。
+
+const DESKTOP_APP_NAME = "WPS 灵犀"
+
+function desktopDataDir(explicit) {
+  if (explicit && String(explicit).trim()) return String(explicit).trim()
+  if (process.platform === "win32") {
+    return join(process.env.APPDATA || join(homedir(), "AppData", "Roaming"), DESKTOP_APP_NAME)
+  }
+  if (process.platform === "darwin") {
+    return join(homedir(), "Library", "Application Support", DESKTOP_APP_NAME)
+  }
+  return join(homedir(), ".config", DESKTOP_APP_NAME)
+}
+
+// DPAPI(CurrentUser) —— 借 PowerShell 一次，不引入原生依赖。
+function dpapiDecrypt(cipher) {
+  if (process.platform !== "win32") throw new Error("DPAPI 只在 Windows 上可用")
+  const b64 = Buffer.from(cipher).toString("base64")
+  const script =
+    "Add-Type -AssemblyName System.Security; " +
+    "[Convert]::ToBase64String([Security.Cryptography.ProtectedData]::Unprotect(" +
+    `[Convert]::FromBase64String('${b64}'), $null, 'CurrentUser'))`
+  const out = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+    encoding: "utf8",
+    timeout: 20000,
+  })
+  return Buffer.from(out.trim(), "base64")
+}
+
+function chromiumKey(dataDir) {
+  const state = JSON.parse(readFileSync(join(dataDir, "Local State"), "utf8"))
+  const wrapped = Buffer.from(state?.os_crypt?.encrypted_key ?? "", "base64")
+  if (wrapped.subarray(0, 5).toString() !== "DPAPI") throw new Error("Local State 里没有 DPAPI 包装的 key")
+  const key = dpapiDecrypt(wrapped.subarray(5))
+  if (key.length !== 32) throw new Error(`AES key 长度异常：${key.length}`)
+  return key
+}
+
+function decryptCookieValue(key, blob) {
+  const version = blob.subarray(0, 3).toString()
+  if (version !== "v10" && version !== "v11") throw new Error(`不支持的 Cookie 加密版本：${version}`)
+  const nonce = blob.subarray(3, 15)
+  const body = blob.subarray(15)
+  const tag = body.subarray(body.length - 16)
+  const decipher = createDecipheriv("aes-256-gcm", key, nonce)
+  decipher.setAuthTag(tag)
+  const plain = Buffer.concat([decipher.update(body.subarray(0, body.length - 16)), decipher.final()])
+  // Chromium 的 host 绑定：前 32 字节是 SHA256(host_key)，后面才是值
+  let value = plain
+  if (value.length > 32) {
+    const head = value.subarray(0, 32)
+    const hashed = head.some((byte) => byte < 9 || (byte > 13 && byte < 32) || byte > 126)
+    if (hashed) value = value.subarray(32)
+  }
+  return value.toString("utf8")
+}
+
+// node:sqlite 要 Node 22+；Bun 用 bun:sqlite。都没有就明确报错。
+async function sqliteAll(file, sql) {
+  try {
+    const { DatabaseSync } = await import("node:sqlite")
+    const db = new DatabaseSync(file, { readOnly: true })
+    try { return db.prepare(sql).all() } finally { db.close() }
+  } catch (error) {
+    try {
+      const { Database } = await import("bun:sqlite")
+      const db = new Database(file, { readonly: true })
+      try { return db.query(sql).all() } finally { db.close() }
+    } catch {
+      throw new Error(`读取客户端 Cookie 需要 Node 22+（node:sqlite）：${error?.message || error}`)
+    }
+  }
+}
+
+async function importLocalAccount(explicitDir) {
+  const dataDir = desktopDataDir(explicitDir)
+  if (!existsSync(join(dataDir, "Local State"))) {
+    return { error: `没有在这个目录找到灵犀客户端数据：${dataDir}` }
+  }
+  let key
+  try { key = chromiumKey(dataDir) } catch (error) { return { error: `读取客户端密钥失败：${error.message}` } }
+
+  const dbs = []
+  const add = (file) => { if (existsSync(file)) dbs.push(file) }
+  add(join(dataDir, "Network", "Cookies"))
+  try {
+    for (const name of readdirSync(join(dataDir, "Partitions"))) {
+      add(join(dataDir, "Partitions", name, "Network", "Cookies"))
+    }
+  } catch {}
+
+  for (const file of dbs) {
+    let rows
+    try {
+      rows = await sqliteAll(file, "select host_key,name,value,encrypted_value from cookies where name in ('wps_sid','uid')")
+    } catch { continue }
+    const found = {}
+    for (const row of rows) {
+      const host = String(row.host_key || "")
+      const name = String(row.name || "")
+      let value = row.value ? String(row.value) : ""
+      if (!value && row.encrypted_value) {
+        try { value = decryptCookieValue(key, Buffer.from(row.encrypted_value)) } catch { continue }
+      }
+      if (!/^[\x21-\x7e]+$/.test(value)) continue
+      if (!found[name] || host.endsWith("wps.cn")) found[name] = value
+    }
+    const sid = found.wps_sid || ""
+    if (sid.length < 16) continue
+    const uid = found.uid || ""
+    const cookie = `wps_sid=${sid}${uid ? `; uid=${uid}` : ""}`
+    return {
+      sid,
+      uid,
+      cookie,
+      host: await probeBase(cookie),
+      accountId: uid ? `wps-${uid}` : `wps-${sid.slice(-8)}`,
+      tail: cookieTail(sid),
+    }
+  }
+  return { error: "客户端里没有已登录的 wps_sid —— 先在灵犀客户端登录一次，或改用浏览器登录" }
+}
+
 export async function WPSLingxiAuthPlugin(input = {}, options = {}) {
   const { client } = input
 
@@ -1433,132 +1624,71 @@ export async function WPSLingxiAuthPlugin(input = {}, options = {}) {
       // 4. 登录认证方式 (支持 网页拉起 或 弹窗粘贴)
       methods: [
         {
+          // 直接打开 Chromium 的登录页，用户在浏览器里登录，插件用 CDP 读会话。
+          // 没有本地 HTML、不粘 Cookie、不需要用户复制任何东西。
           type: "oauth",
-          label: "浏览器登录 (自动抓取 Cookie)",
+          label: "浏览器登录（打开 WPS 登录页）",
           async authorize() {
-            let settle
-            const done = new Promise((resolve) => {
-              settle = resolve
-            })
-            let settled = false
-            const controller = new AbortController()
-            let state = { status: "waiting", message: "", accountId: "" }
-            let server
-
-            const finish = (result) => {
-              if (settled) return
-              settled = true
-              settle(result)
-              try { controller.abort() } catch {}
-              setTimeout(() => { try { server?.close() } catch {} }, 2000)
-            }
-
-            // 归一输入 + 选一个真正接受这把 Cookie 的域名，然后结算。
-            const succeed = async (raw) => {
-              const cred = normalizeCredential(raw)
-              if (cred.error) return { error: cred.error }
-              const host = await probeBase(cred.cookie)
-              state = { status: "success", message: "", accountId: cred.accountId }
-              finish({
-                type: "success",
-                access: cred.sid,
-                refresh: "",
-                // Cookie 约一年有效，且没有刷新接口；真正的判据是上游 401。
-                expires: Date.now() + 360 * 24 * 3600 * 1000,
-                cookie: cred.cookie,
-                accountId: cred.accountId,
-                metadata: { sid: cred.sid, uid: cred.uid, cookieTail: cred.tail, accountId: cred.accountId, host },
-              })
-              return {}
-            }
-
-            server = createServer(async (req, res) => {
-              const url = new URL(req.url, `http://${req.headers.host || "127.0.0.1"}`)
-              if (url.pathname === "/status") {
-                res.writeHead(200, { "Content-Type": "application/json" })
-                res.end(JSON.stringify(state))
-                return
-              }
-              if (url.pathname === "/callback") {
-                const raw = url.searchParams.get("sid")?.trim() || url.searchParams.get("cookie")?.trim() || ""
-                const result = await succeed(raw)
-                if (result.error) {
-                  res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" })
-                  res.end(
-                    '<!DOCTYPE html><html><head><meta charset="utf-8"><title>凭据无效</title></head>' +
-                    '<body style="font-family:-apple-system,sans-serif;text-align:center;padding-top:60px">' +
-                    '<h2 style="color:#c42b1c">凭据无效</h2>' +
-                    '<p style="font-size:16px;color:#555">' + escapeHtml(result.error) + '</p>' +
-                    '<p><a href="/" style="color:#0078d4">返回重试</a></p></body></html>'
-                  )
-                  return
-                }
-                res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" })
-                res.end(
-                  '<!DOCTYPE html><html><head><meta charset="utf-8"><title>授权成功</title></head>' +
-                  '<body style="font-family:-apple-system,sans-serif;text-align:center;padding-top:60px">' +
-                  '<h2 style="color:#107c41">✅ 授权成功</h2>' +
-                  '<p style="font-size:16px;color:#555">已保存 ' + escapeHtml(state.accountId) + '，可以关闭此页</p></body></html>'
-                )
-                return
-              }
-              res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" })
-              res.end(
-                '<!DOCTYPE html><html><head><meta charset="utf-8"><title>WPS 灵犀授权</title></head>' +
-                '<body style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;padding:40px;max-width:640px;margin:0 auto;color:#333;line-height:1.6">' +
-                '<h2 style="color:#0078d4">WPS 灵犀授权</h2>' +
-                '<p id="state">正在打开登录窗口…</p>' +
-                '<ol><li>在弹出的浏览器窗口里登录 WPS（<a href="https://lingxi.wps.cn" target="_blank" style="color:#0078d4">lingxi.wps.cn</a>）；</li>' +
-                '<li>登录完成后本页会自动显示成功，不需要复制任何东西。</li></ol>' +
-                '<details><summary style="cursor:pointer;color:#666">浏览器没有弹出 / 自动登录失败？手动粘贴</summary>' +
-                '<form action="/callback" method="GET" style="margin-top:16px">' +
-                '<input name="sid" style="width:100%;box-sizing:border-box;padding:12px;font-size:14px;border:1px solid #ccc;border-radius:6px" placeholder="粘贴 wps_sid 或整段 Cookie" required />' +
-                '<button type="submit" style="margin-top:12px;padding:12px 28px;font-size:15px;background:#0078d4;color:#fff;border:none;border-radius:6px;cursor:pointer">确认提交</button>' +
-                '</form></details>' +
-                '<script>setInterval(async function(){try{var r=await fetch("/status");var j=await r.json();var el=document.getElementById("state");if(j.status==="success"){el.textContent="已登录："+j.accountId+"，可以关闭此页";el.style.color="#107c41";}else if(j.status==="manual"){el.textContent="自动登录不可用："+j.message+"（可展开下方手动粘贴）";el.style.color="#c42b1c";}}catch(e){}},1500);</script>' +
-                '</body></html>'
+            const browser = findBrowser()
+            if (!browser) {
+              throw new Error(
+                "没有找到 Chromium 内核浏览器（Chrome / Edge / 360极速 / QQ / Brave 等）。" +
+                "装一个，或用 MAGPIE_LINGXI_BROWSER 指向它的 exe。360 安全浏览器可能不支持调试端口，建议 360极速或 Chrome/Edge",
               )
+            }
+            const controller = new AbortController()
+            const done = new Promise((resolve, reject) => {
+              void (async () => {
+                try {
+                  const { sid, uid } = await chromiumLogin({
+                    browser,
+                    url: `${BASE}/`,
+                    timeoutMs: 5 * 60 * 1000,
+                    signal: controller.signal,
+                  })
+                  const cred = normalizeCredential(`wps_sid=${sid}${uid ? `; uid=${uid}` : ""}`)
+                  if (cred.error) throw new Error(cred.error)
+                  const host = await probeBase(cred.cookie)
+                  resolve({
+                    type: "success",
+                    access: cred.sid,
+                    refresh: "",
+                    // Cookie 约一年有效；没有刷新接口，真正的判据是上游 401。
+                    expires: Date.now() + 360 * 24 * 3600 * 1000,
+                    cookie: cred.cookie,
+                    accountId: cred.accountId,
+                    metadata: { sid: cred.sid, uid: cred.uid, cookieTail: cred.tail, accountId: cred.accountId, host },
+                  })
+                } catch (error) {
+                  reject(error)
+                }
+              })()
             })
-
-            await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))
-            const port = server.address().port
-            const authUrl = `http://127.0.0.1:${port}/`
-
-            exec(process.platform === "win32" ? `start ${authUrl}` : `open ${authUrl}`)
-
-            // 后台打开独立配置的 Chrome/Edge；用户在网页里登录后自动读 wps_sid。
-            void (async () => {
-              try {
-                const { sid, uid } = await browserLogin({ url: `${BASE}/`, timeoutMs: 5 * 60 * 1000, signal: controller.signal })
-                await succeed(`wps_sid=${sid}${uid ? `; uid=${uid}` : ""}`)
-              } catch (error) {
-                if (settled) return
-                state = { status: "manual", message: error?.message || String(error), accountId: "" }
-              }
-            })()
-
             return {
-              url: authUrl,
-              instructions: "已打开浏览器登录窗口，登录后自动完成；也可以在本页手动粘贴 Cookie",
+              url: `${BASE}/`,
+              instructions: "已在浏览器打开 WPS 登录页，登录成功后自动完成，不需要复制 Cookie",
               method: "auto",
+              opened: true,
               callback: () => done,
             }
           },
         },
         {
+          // 客户端已经登录过时最省事：直接读它的 Cookie 库，不弹浏览器、不重登。
           type: "api",
-          label: "直接粘贴 Cookie (在 Magpie 弹窗中输入)",
+          label: "导入本机灵犀客户端账号",
           prompts: [
             {
-              key: "sid",
-              label: "wps_sid 或整段 Cookie",
-              type: "password",
-              placeholder: "粘贴 wps_sid 的值，或整段 Cookie（含 wps_sid=…）",
+              key: "dir",
+              label: "客户端数据目录（留空自动检测）",
+              type: "text",
+              placeholder: "例如 C:\Users\你\AppData\Roaming\WPS 灵犀",
+              required: false,
             },
           ],
           async authorize(inputs) {
-            const cred = normalizeCredential(inputs?.sid)
-            if (cred.error) return { type: "failed", error: cred.error }
+            const cred = await importLocalAccount(inputs?.dir)
+            if (cred?.error) return { type: "failed", error: cred.error }
             return {
               type: "success",
               key: cred.sid,
@@ -1570,6 +1700,7 @@ export async function WPSLingxiAuthPlugin(input = {}, options = {}) {
                 cookieTail: cred.tail,
                 cookie: cred.cookie,
                 accountId: cred.accountId,
+                host: cred.host,
               },
             }
           },
@@ -1584,6 +1715,7 @@ export default WPSLingxiAuthPlugin
 // 内部工具（单测/排障用；magpie 只读 default 与命名导出，不受影响）。
 export const _internal = {
   parseCookieInput,
+  importLocalAccount,
   extractSid,
   extractUid,
   identityOf,

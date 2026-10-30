@@ -44,14 +44,10 @@ test('input without a wps_sid is refused', () => {
   assert.equal(parseCookieInput('Cookie: lang=zh'), null)
 })
 
-test('the paste method returns the normalized credential', async () => {
-  const plugin = await WPSLingxiAuthPlugin()
-  const paste = plugin.auth.methods.find((m) => m.type === 'api')
-  const empty = await paste.authorize({ sid: '' })
-  assert.equal(empty.type, 'failed')
-  const ok = await paste.authorize({ sid: 'Cookie: wps_sid=V02Spaste000000000000; uid=9' })
-  assert.equal(ok.type, 'success')
-  assert.equal(ok.key, 'V02Spaste000000000000')
-  assert.equal(ok.metadata.cookie, 'wps_sid=V02Spaste000000000000; uid=9')
-  assert.equal(ok.metadata.accountId, 'wps-9')
+test('normalization keeps wps_sid and uid for the account slot', () => {
+  const cred = _internal.normalizeCredential('Cookie: wps_sid=V02Spaste000000000000; uid=9')
+  assert.equal(cred.sid, 'V02Spaste000000000000')
+  assert.equal(cred.cookie, 'wps_sid=V02Spaste000000000000; uid=9')
+  assert.equal(cred.accountId, 'wps-9')
+  assert.ok(_internal.normalizeCredential('').error)
 })

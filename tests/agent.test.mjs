@@ -1,7 +1,8 @@
 // agent-runtime 平面与登录归一的单测（网络全部打桩，不碰真上游）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { WPSLingxiAuthPlugin } from '../index.mjs'
+import { WPSLingxiAuthPlugin, _internal } from '../index.mjs'
+const _internalForTests = () => _internal
 
 const SID = 'SID' + 'a'.repeat(29)
 const COOKIE = `wps_sid=${SID}`
@@ -40,22 +41,26 @@ function agentRoutes(chat) {
   }
 }
 
-test('login keeps wps_sid and uid, from a bare value or a whole cookie', async () => {
+test('credentials keep wps_sid and uid, from a bare value or a whole cookie', async () => {
   const plugin = await WPSLingxiAuthPlugin()
-  const api = plugin.auth.methods.find((method) => method.type === 'api')
+  const oauth = plugin.auth.methods.find((method) => method.type === 'oauth')
+  const importMethod = plugin.auth.methods.find((method) => /导入/.test(method.label))
+  assert.ok(oauth, 'a browser-login method must exist')
+  assert.ok(importMethod, 'a local-client import method must exist')
+  // 浏览器登录自己开页，magpie 不要再开一次
+  assert.equal(typeof oauth.authorize, 'function')
 
-  const whole = await api.authorize({ sid: `kso_sid=x; wps_sid=${SID}; uid=42` })
-  assert.equal(whole.type, 'success')
-  assert.equal(whole.key, SID)
+  const { normalizeCredential } = _internalForTests()
+  const whole = normalizeCredential(`kso_sid=x; wps_sid=${SID}; uid=42`)
+  assert.equal(whole.sid, SID)
+  assert.equal(whole.uid, '42')
   assert.equal(whole.cookie, `${COOKIE}; uid=42`)
-  assert.equal(whole.metadata.sid, SID)
-  assert.equal(whole.metadata.uid, '42')
-  assert.equal(whole.metadata.cookieTail, SID.slice(-4))
-  assert.equal(whole.metadata.accountId, 'wps-42')
+  assert.equal(whole.tail, SID.slice(-4))
+  assert.equal(whole.accountId, 'wps-42')
 
-  assert.equal((await api.authorize({ sid: 'short' })).type, 'failed')
-  assert.equal((await api.authorize({ sid: 'a=b; c=d' })).type, 'failed')
-  assert.equal((await api.authorize({ sid: '' })).type, 'failed')
+  assert.ok(normalizeCredential('short').error)
+  assert.ok(normalizeCredential('a=b; c=d').error)
+  assert.ok(normalizeCredential('').error)
 })
 
 test('a non-wps_sid token never reaches upstream', async () => {

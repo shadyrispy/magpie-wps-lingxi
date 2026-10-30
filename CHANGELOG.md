@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.2 — 2026-10-31
+
+- 登录重做：去掉本地 HTML 授权向导与 Cookie 粘贴框，点登录直接打开 WPS 登录页，
+  登录成功后用 CDP 自行读取会话，用户不需要复制任何东西。
+- 浏览器发现扩展：除 Chrome/Edge 外支持 Brave / Vivaldi / Chromium / 360极速 / 360安全 /
+  QQ / 搜狗，并支持 `MAGPIE_LINGXI_BROWSER` 指定路径（修 issue #1：360 下找不到浏览器）。
+- 新增「导入本机灵犀客户端账号」：读客户端 `Partitions/*/Network/Cookies`，
+  DPAPI 解 key、AES-GCM 解值，并处理 Chromium 明文前的 32 字节 host 哈希。
+- 账号仍按 `uid` 区分，导入/浏览器登录两条路都走同一套归一化。
+
 ## 0.3.1 — 2026-10-30
 
 - 思考档位按模型下发：`variants` 从目录里的 `reasoning_efforts` 生成，不再所有模型都
