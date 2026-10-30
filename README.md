@@ -40,6 +40,10 @@ Claude Code、Codex、Cursor 等任何支持 OpenAI 格式的客户端。
 - 📊 **智点额度 (`auth.usage`)**  
   `GET /api/public/v1/credits/balance`：`total_balance` 为剩余，`bonus_summary.total_value/total_consumed`
   给已用比例；钱包型账号（没有总额）也返回有限 `used`，不会从路由里消失。
+- ⏳ **临时积分（快到期的那部分）**  
+  赠送批次按 `expire_time` 分档：**15 天内到期**的单独显示成「临时积分」窗口，
+  带余额和到期日（判据与 jet 插件一致；`MAGPIE_LINGXI_TEMP_DAYS` 可改天数）。
+  优先消耗由服务端决定，这里只负责让你看见“哪部分马上要过期”。
 - 🔄 **模型目录 (`provider.models`)**  
   只读客户端自己的 `GET /api/aioffice/v1/sessions/plans`（`plans` + `models`，带倍率与推理档位）；
   未登录时用手指量的快照，不假装实时。
@@ -159,6 +163,7 @@ magpie accounts checkin
 ## 📋 模型列表（客户端目录快照）
 
 登录后由 `/api/aioffice/v1/sessions/plans` 实时替换；下表是未登录时的快照。
+模型名与倍率分开：`name` 只有模型名，倍率走 magpie 的 `rate` 字段（数字），由面板渲染成倍率胶囊。
 
 | 模型标识 | 名称 | 上下文 | 倍率 | 深度思考 |
 | :--- | :--- | :--- | :--- | :---: |
