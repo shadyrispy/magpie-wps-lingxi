@@ -144,3 +144,16 @@ magpie plugin login wps-lingxi
    不打开浏览器、不用重新登录、也不用填任何路径（自动扫描客户端数据目录；Windows
    用 DPAPI + AES-GCM 解密客户端 Cookie 库，macOS 的客户端 Cookie 本身就是明文存储、
    直接读取即可 —— 1.3.27 / 1.3.31 实测，需 Node 22+）。
+
+多账号：凭据按 `uid` 区分（没有 `uid` 时按 `wps_sid` 尾部），界面显示尾号 4 位。
+
+> **卡片名还是「WPS 灵犀账户」的旧账号**不会自己变成 `wps-<uid>`：迁移写在 `auth.refresh` 里，
+> magpie 只在 `expires` 前 5 分钟才调它，`expires` 还在很久以后的账号就等不到。
+> 删掉那个账号，重登一次即可（浏览器登录或「导入本机灵犀客户端账号」）。
+
+查看额度与签到：
+
+```bash
+magpie quota wps-lingxi
+magpie accounts checkin
+```

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.3 — 2026-10-31
+
+- **macOS 客户端导入**（移植 PR #6，shadyrispy 真机验证）：目录判据放宽为
+  「像 Electron profile」，Cookie 库收集覆盖 `Partitions/<n>/Cookies`（mac 无
+  Network/ 子目录），mac 的 Chromium 不启用 OSCrypt、Cookie 明文直接读，
+  仅 Windows/有 Local State 时才走 DPAPI+AES-GCM；错误区分「没找到目录」
+  与「目录在但没登录」。新增 5 条 mac 导入测试（36 条全绿）。
+- 合并 PR #7（MYCF711）：README 登录一节补「旧账号卡片名不会自迁移」说明
+  （迁移在 `auth.refresh`，magpie 仅在 `expires` 前 5 分钟调用）。
+
 ## 0.4.2 — 2026-10-31
 
 - 文档全面更新到最终状态：README 特性/对齐清单/脚本说明、TESTER-GUIDE 三级自测、
