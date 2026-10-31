@@ -147,6 +147,10 @@ magpie plugin login wps-lingxi
 
 多账号：凭据按 `uid` 区分（没有 `uid` 时按 `wps_sid` 尾部），界面显示尾号 4 位。
 
+> **卡片名还是「WPS 灵犀账户」的旧账号**不会自己变成 `wps-<uid>`：迁移写在 `auth.refresh` 里，
+> magpie 只在 `expires` 前 5 分钟才调它，`expires` 还在很久以后的账号就等不到。
+> 删掉那个账号，重登一次即可（浏览器登录或「导入本机灵犀客户端账号」）。
+
 查看额度与签到：
 
 ```bash
