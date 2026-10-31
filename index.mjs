@@ -1297,7 +1297,7 @@ async function runExpertConversationViaAigc(cookie, base, text = TASK_TEXT) {
 // "365wps-lingxi-client" 是服务端从 lingxi_claw 映射出的网关 Product-Name，
 // 直接当 client_type 发会话会被上游走到异常路径（实测 AuditFailed）。
 // 文案也不能用 "hi" 这类裸词——cowork 平面的风控会拒（实测 AuditFailed）。
-const TASK_TEXT = "请用一句话介绍你自己"
+const TASK_TEXT = "请用两三句话介绍一下你自己，包括你擅长的任务类型"
 
 async function pickTaskModel(cookie, base) {
   try {
@@ -1334,7 +1334,9 @@ async function runTaskConversation(cookie, base, { clientType, sessionMode, curr
     stream: false,
     model,
     messages: [{ role: "user", content: text || TASK_TEXT }],
-    max_tokens: 256,
+    // 上游按用量扣智点（整数余额）；回答太短可能凑不够 1 智点而不产生计费记录，
+    // 给到正常对话的规模（实测真实客户端一句"你好"扣 1 智点）。
+    max_tokens: 4096,
   }
   const errorResponse = (message, status = 502, code = "upstream_error") => new Response(
     JSON.stringify({ error: { message, code } }),
