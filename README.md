@@ -34,9 +34,9 @@ Claude Code、Codex、Cursor 等任何支持 OpenAI 格式的客户端。
 - 🎁 **每日签到 + 一次性任务 (`auth.checkin`)**  
   读客户端任务中心 `GET /api/public/v1/tasks`，领取 `daily_check_in`；
   已领过返回 `done`，领到返回 `claimed` 并用领前/领后余额差作为奖励。
-  一次性任务：上游已判 `claimable` 的直接领；「体验群聊」用官方
-  `POST /api/imchat/v1/channels` 建群再解散完成；「专家模式 / 使用客户端」需要
-  一次真实客户端对话，纯 HTTP 无法翻转状态，**不会假装修好**（详见下文）。
+  一次性任务**全自动**：上游已判 `claimable` 的直接领；「专家模式 + 使用客户端」
+  用一次双标志对话完成；「体验群聊」走网页端同款流程（`cowork_web` 会话 +
+  WS `user.input` → 建群 → 解散）。干净账号实测三任务一次签到全部翻转领取。
 - 📊 **智点额度 (`auth.usage`)**  
   `GET /api/public/v1/credits/balance`：`total_balance` 为剩余，`bonus_summary.total_value/total_consumed`
   给已用比例；钱包型账号（没有总额）也返回有限 `used`，不会从路由里消失。
@@ -91,9 +91,8 @@ Claude Code、Codex、Cursor 等任何支持 OpenAI 格式的客户端。
 | 一次性任务·专家/客户端 | ✅ 已验证 | v0.3.15 的 `execution_status` 生命周期（running → 对话 → completed，真实内核抓包复刻）是真根因修复；未领账号实测两任务同时翻转并自动领取（issue #5） |
 | 脚手架 | ✅ | `check.mjs` 30 通过 / 0 警告 / 0 失败；`score.mjs` 身份门通过、自动分 65/65 |
 
-> `try_expert_mode` / `use_lingxi_client` 目前是「纯协议尝试」：带标志发一次最小对话后重拉任务，
-> 是否翻转由服务端判定。验证方法见 [`docs/ONE-TIME-TASKS.md`](./docs/ONE-TIME-TASKS.md)
-> （需要账号上这两个任务**还没领过**）。
+> 三个一次性任务的翻转已在未领账号实测通过（issue #5 三轮验证），
+> 过程与协议依据见 [`docs/ONE-TIME-TASKS.md`](./docs/ONE-TIME-TASKS.md)。
 
 ### 怎么验一次性任务
 
@@ -102,8 +101,8 @@ Claude Code、Codex、Cursor 等任何支持 OpenAI 格式的客户端。
 node tests/test_tasks.mjs --sid "你的 wps_sid"
 ```
 
-脚本会：列出任务 → 尝试建群（若群聊未完成）→ 重拉任务 → 领取所有 `claimable`，
-并打印每一步前后的 `status`。**专家/客户端任务只会显示 `incomplete`，脚本不会伪造完成。**
+脚本会：列出任务 → 完成未完成的任务动作（专家/客户端对话、建群）→ 重拉任务 →
+领取所有 `claimable`，并打印每一步前后的 `status`。
 
 ---
 
