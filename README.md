@@ -142,8 +142,9 @@ magpie plugin login wps-lingxi
    支持任意 Chromium 内核浏览器：Chrome / Edge / Brave / Vivaldi / 360极速 / 360安全 / QQ / 搜狗；
    找不到时可用 `MAGPIE_LINGXI_BROWSER` 指定浏览器 exe（360 安全浏览器可能不支持调试端口，建议 360极速）。
 2. **导入本机灵犀客户端账号**：已经在灵犀客户端登录过时，点这一项直接读客户端本地会话，
-   不打开浏览器、不用重新登录、也不用填任何路径（自动扫描客户端数据目录；Windows，
-   用 DPAPI + AES-GCM 解密客户端 Cookie 库）。
+   不打开浏览器、不用重新登录、也不用填任何路径（自动扫描客户端数据目录；Windows
+   用 DPAPI + AES-GCM 解密客户端 Cookie 库，macOS 的客户端 Cookie 本身就是明文存储、
+   直接读取即可 —— 1.3.27 / 1.3.31 实测，需 Node 22+）。
 
 多账号：凭据按 `uid` 区分（没有 `uid` 时按 `wps_sid` 尾部），界面显示尾号 4 位。
 

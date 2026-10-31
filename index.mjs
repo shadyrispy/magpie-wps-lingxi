@@ -1641,9 +1641,12 @@ async function fetchModelPlans(cookie, base = BASE) {
 
 // ── 导入本机灵犀客户端账号 ───────────────────────────────────────────
 // 客户端把会话 Cookie 放在 Electron 的 persist 分区里：
-//   %APPDATA%\WPS 灵犀\Partitions\<分区>\Network\Cookies
-// 值是 Chromium OSCrypt v10（AES-256-GCM），key 由 DPAPI 包在 Local State；
-// 2026-10 实测明文前 32 字节是 host 哈希，真正的值从第 33 字节开始。
+//   Windows: %APPDATA%\WPS 灵犀\Partitions\<分区>\Network\Cookies
+//   macOS:   ~/Library/Application Support/WPS 灵犀\Partitions\<分区>\Cookies
+// Windows 的值是 Chromium OSCrypt v10（AES-256-GCM），key 由 DPAPI 包在 Local
+// State；2026-10 实测明文前 32 字节是 host 哈希，真正的值从第 33 字节开始。
+// macOS 的 Chromium 不启用 OSCrypt，值直接明文在 value 列（1.3.27 / 1.3.31
+// 实测一致），目录里也没有 Local State。两种布局都收。
 
 const DESKTOP_APP_NAME = "WPS 灵犀"
 
@@ -1662,9 +1665,30 @@ function desktopDataDirs(explicit) {
   return roots.flatMap((root) => names.map((name) => join(root, name)))
 }
 
-// DPAPI(CurrentUser) —— 借 PowerShell 一次，不引入原生依赖。
+// 一个数据目录下所有可能装着 Cookie 的库（Windows 与 macOS 两种布局都收）。
+function clientCookieDbs(dir) {
+  const dbs = []
+  const add = (file) => { if (existsSync(file)) dbs.push(file) }
+  add(join(dir, "Network", "Cookies"))
+  add(join(dir, "Cookies"))
+  try {
+    for (const name of readdirSync(join(dir, "Partitions"))) {
+      add(join(dir, "Partitions", name, "Network", "Cookies"))
+      add(join(dir, "Partitions", name, "Cookies"))
+    }
+  } catch {}
+  return dbs
+}
+
+// 目录标记：Windows 用 Local State 存加密 key，macOS 上没有 —— 数据目录的
+// 判据放宽为「像 Electron profile」：根 Cookies 库、Local State、Partitions 任一。
+function looksLikeDataDir(dir) {
+  return existsSync(join(dir, "Local State")) || existsSync(join(dir, "Cookies")) || existsSync(join(dir, "Partitions"))
+}
+
+// DPAPI(CurrentUser) —— 借 PowerShell 一次，不引入原生依赖（仅 Windows；macOS 不启用 OSCrypt，走不到这里）。
 function dpapiDecrypt(cipher) {
-  if (process.platform !== "win32") throw new Error("DPAPI 只在 Windows 上可用")
+  if (process.platform !== "win32") throw new Error("DPAPI 只在 Windows 上可用（macOS 的客户端 Cookie 是明文存储，不需要解密）")
   const b64 = Buffer.from(cipher).toString("base64")
   const script =
     "Add-Type -AssemblyName System.Security; " +
@@ -1723,22 +1747,28 @@ async function sqliteAll(file, sql) {
 }
 
 async function importLocalAccount(explicitDir) {
+  const explicit = explicitDir && String(explicitDir).trim()
   const dirs = desktopDataDirs(explicitDir)
-  const dataDir = dirs.find((dir) => existsSync(join(dir, "Local State")))
+  // 目录判据：要么像 Electron profile（根 Cookies 库 / Local State / Partitions），
+  // 要么至少装着分区 Cookie 库（macOS 根目录可能只有 Partitions）。空目录不算数，
+  // 否则「目录不存在」和「目录在但没登录」两个错误就混成一条了。
+  let dataDir = dirs.find((dir) => looksLikeDataDir(dir))
+  if (!dataDir) dataDir = dirs.find((dir) => clientCookieDbs(dir).length > 0)
   if (!dataDir) {
+    // 用户显式指定的目录即使空着也按「没登录」报：路径是他给的，不该说「没找到」。
+    // 但路径根本不存在时仍是「没找到」（多半拼错了）。
+    if (explicit && explicit === dirs[0] && existsSync(dirs[0])) {
+      return { error: "这个目录里没有已登录的 wps_sid —— 先在灵犀客户端登录一次，或改用浏览器登录" }
+    }
     return { error: `没有找到灵犀客户端数据目录（找过：${dirs.join("、")}）。装了客户端并登录过一次后再试，或用 MAGPIE_LINGXI_HOME 指定目录` }
   }
+  // Windows 的值才需要解密；macOS 的 Chromium 不启用 OSCrypt，读不到 Local State 是正常的。
   let key
-  try { key = chromiumKey(dataDir) } catch (error) { return { error: `读取客户端密钥失败：${error.message}` } }
+  if (process.platform === "win32" || existsSync(join(dataDir, "Local State"))) {
+    try { key = chromiumKey(dataDir) } catch (error) { return { error: `读取客户端密钥失败：${error.message}` } }
+  }
 
-  const dbs = []
-  const add = (file) => { if (existsSync(file)) dbs.push(file) }
-  add(join(dataDir, "Network", "Cookies"))
-  try {
-    for (const name of readdirSync(join(dataDir, "Partitions"))) {
-      add(join(dataDir, "Partitions", name, "Network", "Cookies"))
-    }
-  } catch {}
+  const dbs = clientCookieDbs(dataDir)
 
   for (const file of dbs) {
     let rows
@@ -1749,8 +1779,10 @@ async function importLocalAccount(explicitDir) {
     for (const row of rows) {
       const host = String(row.host_key || "")
       const name = String(row.name || "")
+      // macOS 明文在 value 列；Windows 加密在 encrypted_value（OSCrypt + DPAPI key）
       let value = row.value ? String(row.value) : ""
       if (!value && row.encrypted_value) {
+        if (!key) continue
         try { value = decryptCookieValue(key, Buffer.from(row.encrypted_value)) } catch { continue }
       }
       if (!/^[\x21-\x7e]+$/.test(value)) continue
@@ -2144,6 +2176,13 @@ export default WPSLingxiAuthPlugin
 export const _internal = {
   parseCookieInput,
   importLocalAccount,
+  desktopDataDirs,
+  looksLikeDataDir,
+  clientCookieDbs,
+  sqliteAll,
+  decryptCookieValue,
+  chromiumKey,
+  dpapiDecrypt,
   extractSid,
   extractUid,
   identityOf,
