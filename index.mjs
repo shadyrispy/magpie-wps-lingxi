@@ -1419,6 +1419,80 @@ async function fetchProfile(cookie, base = BASE) {
   }
 }
 
+// 群聊任务全流程（网页端建群的原样复刻，纯 HTTP/WS）：
+//   1. 建 cowork_web 会话
+//   2. WSS completions/ws 发一次 user.input（服务端据此把会话标记为真实使用）
+//   3. 等 run.end
+//   4. POST channels 建群 → 解散（任务判定"创建或加入任意一个群聊"）
+// 测试可注入 FakeWS；生产环境用全局 WebSocket（Node 22+ / Bun 均内置）
+let groupWSFactory = null
+
+async function runGroupTaskConversation(cookie, base, { text } = {}) {
+  const headers = {
+    Cookie: clientCookie(cookie),
+    "Content-Type": "application/json",
+    Accept: "application/json, text/plain, */*",
+    "User-Agent": UA,
+    Origin: base,
+    Referer: `${base}/advanced/chat`,
+  }
+  let sessionId = ""
+  try {
+    const s = await fetch(`${base}/api/aioffice/v1/cowork/sessions`, {
+      method: "POST", headers, body: JSON.stringify({ session_type: "cowork_web" }),
+      signal: AbortSignal.timeout(30000),
+    })
+    sessionId = String((await s.json().catch(() => ({})))?.data?.session_id ?? "")
+    if (!sessionId) return { ok: false, detail: `cowork_web 会话 HTTP ${s.status}` }
+  } catch (error) {
+    return { ok: false, detail: String(error?.message || error).slice(0, 120) }
+  }
+
+  const wsUrl = `${base.replace(/^http/, "ws")}/api/aioffice/v1/sessions/${sessionId}/completions/ws`
+  const model = "plan_pro" // 群聊频道固定用 plan_pro（网页端一致）
+  const opened = await new Promise((resolve) => {
+    const ws = (groupWSFactory || ((u, o) => new WebSocket(u, o)))(wsUrl, { headers: { Cookie: clientCookie(cookie), "User-Agent": UA, Origin: base } })
+    const timer = setTimeout(() => { try { ws.close() } catch {} }, 60000)
+    ws.onopen = () => {
+      ws.send(JSON.stringify({
+        event: "user.input",
+        data: {
+          agent_input: {
+            text: text || TASK_TEXT, files: [], refs: [],
+            expect_model: model, reasoning_effort: "low",
+            permission_mode: "default", current_mode: "agent",
+            browser_plugin_enabled: false,
+          },
+          headers: { client_type: "lingxi_claw", open_position: "clawapp" },
+        },
+      }))
+    }
+    ws.onmessage = (ev) => {
+      try {
+        const j = JSON.parse(ev.data)
+        if (j.event === "run.end" || j.event === "stream.end" || j.event === "done") {
+          clearTimeout(timer)
+          try { ws.close() } catch {}
+          resolve(true)
+        }
+        if (j.event === "error" || j.event === "force.stop") {
+          clearTimeout(timer)
+          try { ws.close() } catch {}
+          resolve(false)
+        }
+      } catch {}
+    }
+    ws.onerror = () => { clearTimeout(timer); resolve(false) }
+  })
+  if (!opened) return { ok: false, detail: "WS 对话未完成" }
+
+  // 建群 → 解散（判定"创建或加入任意一个群聊"）
+  const group = await createGroupChatWith(cookie, base, sessionId)
+  if (!group.ok) return { ok: false, detail: group.error || "建群失败" }
+  await deleteGroupChat(cookie, base, group.channelId)
+  return { ok: true, detail: "建群 ✓" }
+}
+
 async function completeOneTimeTasks(cookie, base, tasks) {
   const msg = []
   let bonus = 0
@@ -1462,28 +1536,11 @@ async function completeOneTimeTasks(cookie, base, tasks) {
     }
   }
 
-  // 群聊：优先用刚对话的会话（一次到位），不行就等它 completed，再不行扫历史会话
+  // 群聊任务：服务端要求会话先在 WS completions 通道上收到过一次 user.input
+  //（真实使用信号，网页端建群前的固定动作），然后才能 POST channels。
   if (needGroup && !poor) {
-    let created = false
-    const tryCreate = async (sid) => {
-      const group = await createGroupChatWith(cookie, base, sid)
-      if (!group.ok) return false
-      msg.push("建群 ✓")
-      await deleteGroupChat(cookie, base, group.channelId)
-      return true
-    }
-    const convId = typeof convSessionId === "string" && convSessionId ? convSessionId : ""
-    if (convId) {
-      created = await tryCreate(convId)
-      if (!created && (await waitSessionCompleted(cookie, base, convId, 30000))) {
-        created = await tryCreate(convId)
-      }
-    }
-    if (!created) {
-      const sid = await pickGroupChatSession(cookie, base)
-      if (sid) created = await tryCreate(sid)
-    }
-    if (!created) msg.push("建群失败（无可用的已完成会话）")
+    const g = await runGroupTaskConversation(cookie, base, { text: TASK_TEXT })
+    msg.push(g.ok ? `建群 ✓(${g.detail})` : `建群失败(${g.detail || "?"})`)
   }
 
   // 重拉任务，领取所有 claimable（含刚被动作带出来的）
@@ -2098,6 +2155,7 @@ export const _internal = {
   summarizeExpiring,
   runExpertConversationViaAigc,
   runTaskConversation,
+  setGroupWSFactory(fn) { groupWSFactory = fn },
   createGroupChatWith,
   deleteGroupChat,
   agentChat,

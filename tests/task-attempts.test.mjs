@@ -3,7 +3,7 @@
 // 这里锁住“标志确实发出去了”与“Cookie 带 x-kso-* 客户端标识”。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { WPSLingxiAuthPlugin } from '../index.mjs'
+import { WPSLingxiAuthPlugin, _internal } from '../index.mjs'
 
 const SID = 'SID' + 'a'.repeat(29)
 const COOKIE = `wps_sid=${SID}`
@@ -23,6 +23,16 @@ function installFetch(handler) {
 
 test('expert (aigc) and client (cowork) attempts send the right flags; cookies carry x-kso-*', async () => {
   const plugin = await WPSLingxiAuthPlugin()
+  class FakeWS {
+    constructor(url) { FakeWS.last = this; this.url = url; this.sent = [] }
+    send(data) { this.sent.push(String(data)); queueMicrotask(() => this.onmessage?.({ data: JSON.stringify({ event: 'run.end' }) })) }
+    close() {}
+    set onopen(fn) { queueMicrotask(() => fn?.()) }
+    set onerror(fn) {}
+    set onmessage(fn) { this._m = fn }
+    get onmessage() { return this._m }
+  }
+  _internal.setGroupWSFactory((url, opts) => new FakeWS(url, opts))
   let taskReads = 0
   const net = installFetch((call) => {
     if (call.url.endsWith('/api/public/v1/tasks')) {
@@ -41,7 +51,7 @@ test('expert (aigc) and client (cowork) attempts send the right flags; cookies c
       })
     }
     if (call.url.includes('/api/public/v1/credits/balance')) return Response.json({ data: { total_balance: 500 } })
-    if (call.url.endsWith('/api/aioffice/v1/cowork/sessions')) return Response.json({ data: { session_id: 's1' } })
+    if (call.url.endsWith('/api/aioffice/v1/cowork/sessions')) return Response.json({ data: { session_id: 's' + net.calls.filter((c) => c.url.endsWith('/api/aioffice/v1/cowork/sessions')).length } })
     if (call.url.endsWith('/api/public/v1/credits/runs')) return Response.json({ data: { run_id: 'r1', group_id: 'g1' } })
     if (call.url.endsWith('/api/public/v1/agent-runtime/chat/completions')) {
       return new Response('data: {"code":"Success","choices":[{"text":"ok","finish_reason":"stop"}]}\n\n', {
@@ -74,9 +84,10 @@ test('expert (aigc) and client (cowork) attempts send the right flags; cookies c
 
     // 一次对话吃两个任务：客户端身份 + 专家模式（session/run 双标志）
     const sessions = net.calls.filter((c) => c.url.endsWith('/api/aioffice/v1/cowork/sessions'))
-    assert.equal(sessions.length, 1)
+    assert.equal(sessions.length, 2)
     assert.equal(sessions[0].body.client_type, 'lingxi_claw')
     assert.equal(sessions[0].body.session_mode, 'expert')
+    assert.equal(sessions[1].body.session_type, 'cowork_web')
     const runs = net.calls.filter((c) => c.url.endsWith('/api/public/v1/credits/runs'))
     assert.equal(runs.length, 1)
     assert.equal(runs[0].body.client_type, 'lingxi_claw')
@@ -97,12 +108,15 @@ test('expert (aigc) and client (cowork) attempts send the right flags; cookies c
     assert.equal(execPuts[1].body.status, 'completed')
     assert.equal(execPuts[1].body.terminal_reason, 'completed')
 
-    // 群聊：直接复用这次对话的会话建群（不扫历史）
+    // 群聊：cowork_web 会话 + WS user.input + 建群/解散
     const channels = net.calls.filter((c) => c.url.endsWith('/api/imchat/v1/channels') && c.method === 'POST')
     assert.equal(channels.length, 1)
-    assert.equal(channels[0].body.session_id, 's1')
+    assert.equal(channels[0].body.session_id, 's2')
+    const gwws = FakeWS.last
+    assert.ok(gwws.url.includes('/completions/ws') && gwws.url.includes('s2'), 'WS 要连群会话的 completions/ws')
+    assert.ok(gwws.sent.some((d) => d.includes('user.input')), 'WS 要发 user.input')
     assert.ok(net.calls.some((c) => c.url.endsWith('/api/imchat/v1/channels/ch-1') && c.method === 'DELETE'))
-    assert.ok(!net.calls.some((c) => c.url.includes('/api/public/v1/session_list')), '首轮建群成功就不该去扫历史会话')
+    assert.ok(!net.calls.some((c) => c.url.includes('/api/public/v1/session_list')), '建群成功就不该去扫历史会话')
 
     // 所有请求的 Cookie 都带客户端标识
     for (const c of net.calls) {

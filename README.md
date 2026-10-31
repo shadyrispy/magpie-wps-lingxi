@@ -87,7 +87,7 @@ Claude Code、Codex、Cursor 等任何支持 OpenAI 格式的客户端。
 | 签到 | ✅ | `tasks` + `tasks/{key}/claim`；已领返回 `done` |
 | 多账号 | ✅ | 按 `uid` 区分（无 uid 用 sid 尾部），不互相覆盖 |
 | 错误语义 | ✅ | 模型/参数错误 → 404；明确鉴权失败 → 401 |
-| 一次性任务·群聊 | ❌ 服务端门控 | 建群 API（与渲染层 `createChannel` 完全一致）在任务领取后按账号关闭通道——任何会话、任何 body 变体都 400（issue #5 实测定性）；插件侧不可修 |
+| 一次性任务·群聊 | ✅ | 网页端同款流程：`cowork_web` 会话 + WS `user.input` → 建群 → 解散（issue #5 的 400 根因已修：空会话缺真实使用信号） |
 | 一次性任务·专家/客户端 | ✅ 已验证 | v0.3.15 的 `execution_status` 生命周期（running → 对话 → completed，真实内核抓包复刻）是真根因修复；未领账号实测两任务同时翻转并自动领取（issue #5） |
 | 脚手架 | ✅ | `check.mjs` 30 通过 / 0 警告 / 0 失败；`score.mjs` 身份门通过、自动分 65/65 |
 

@@ -251,6 +251,16 @@ test('checkin marks an expired cookie for re-login', async () => {
 
 test('a group_chat one-time task is completed by creating and deleting a channel', async () => {
   const plugin = await WPSLingxiAuthPlugin()
+  class FakeWS {
+    constructor(url) { FakeWS.last = this; this.url = url; this.sent = [] }
+    send(data) { this.sent.push(String(data)); queueMicrotask(() => this.onmessage?.({ data: JSON.stringify({ event: 'run.end' }) })) }
+    close() {}
+    set onopen(fn) { queueMicrotask(() => fn?.()) }
+    set onerror(fn) {}
+    set onmessage(fn) { this._m = fn }
+    get onmessage() { return this._m }
+  }
+  _internal.setGroupWSFactory((url, opts) => new FakeWS(url, opts))
   let phase = 0
   const net = installFetch((call) => {
     if (call.url.endsWith('/api/public/v1/tasks')) {
@@ -265,6 +275,9 @@ test('a group_chat one-time task is completed by creating and deleting a channel
     if (call.url.includes('/api/public/v1/session_list')) {
       return Response.json({ result: 'ok', data: { list: [{ session_id: 'done-1', status: 'finished' }, { session_id: 'running-1', status: 'running' }] } })
     }
+    if (call.url.endsWith('/api/aioffice/v1/cowork/sessions')) {
+      return Response.json({ data: { session_id: 'gw1' } })
+    }
     if (call.url.endsWith('/api/public/v1/sessions/done-1')) {
       return Response.json({ data: { execution_status: 'completed' } })
     }
@@ -272,7 +285,7 @@ test('a group_chat one-time task is completed by creating and deleting a channel
       return Response.json({ data: { execution_status: 'running' } })
     }
     if (call.url.endsWith('/api/imchat/v1/channels') && call.method === 'POST') {
-      assert.equal(call.body.session_id, 'done-1')
+      assert.equal(call.body.session_id, 'gw1')
       return Response.json({ code: 'Success', data: { channel_id: 'ch-1' } })
     }
     if (call.url.endsWith('/api/imchat/v1/channels/ch-1') && call.method === 'DELETE') {
@@ -291,6 +304,11 @@ test('a group_chat one-time task is completed by creating and deleting a channel
     assert.ok(net.calls.some((c) => c.url.endsWith('/api/imchat/v1/channels') && c.method === 'POST'))
     assert.ok(net.calls.some((c) => c.url.endsWith('/api/imchat/v1/channels/ch-1') && c.method === 'DELETE'))
     assert.ok(net.calls.some((c) => c.url.includes('/tasks/try_group_chat/claim')))
+    const ws = FakeWS.last
+    assert.ok(ws.url.includes('/completions/ws') && ws.url.includes('gw1'), 'WS 要连到会话的 completions/ws')
+    assert.ok(ws.sent.some((d) => d.includes('user.input') && d.includes('plan_pro')), 'WS 要发 user.input')
+    const gwSession = net.calls.find((c) => c.url.endsWith('/api/aioffice/v1/cowork/sessions') && c.body?.session_type === 'cowork_web')
+    assert.ok(gwSession, '群任务要先建 cowork_web 会话')
   } finally {
     net.restore()
   }
