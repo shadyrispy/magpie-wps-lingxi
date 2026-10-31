@@ -1662,9 +1662,32 @@ function desktopDataDirs(explicit) {
   return roots.flatMap((root) => names.map((name) => join(root, name)))
 }
 
+// 一个数据目录下所有可能装着 Cookie 的库（Windows 与 macOS 两种布局都收）：
+//   Windows: <dir>/Network/Cookies 与 <dir>/Partitions/<n>/Network/Cookies
+//   macOS:   <dir>/Partitions/<n>/Cookies（没有 Network/ 子目录）
+function clientCookieDbs(dir) {
+  const dbs = []
+  const add = (file) => { if (existsSync(file)) dbs.push(file) }
+  add(join(dir, "Network", "Cookies"))
+  add(join(dir, "Cookies"))
+  try {
+    for (const name of readdirSync(join(dir, "Partitions"))) {
+      add(join(dir, "Partitions", name, "Network", "Cookies"))
+      add(join(dir, "Partitions", name, "Cookies"))
+    }
+  } catch {}
+  return dbs
+}
+
+// 数据目录判据：Windows 用 Local State 存加密 key，macOS 上没有 —— 判据放宽为
+// 「像 Electron profile」：根 Cookies 库、Local State、Partitions 任一。
+function looksLikeDataDir(dir) {
+  return existsSync(join(dir, "Local State")) || existsSync(join(dir, "Cookies")) || existsSync(join(dir, "Partitions"))
+}
+
 // DPAPI(CurrentUser) —— 借 PowerShell 一次，不引入原生依赖。
 function dpapiDecrypt(cipher) {
-  if (process.platform !== "win32") throw new Error("DPAPI 只在 Windows 上可用")
+  if (process.platform !== "win32") throw new Error("DPAPI 只在 Windows 上可用（macOS 的客户端 Cookie 是明文存储，不需要解密）")
   const b64 = Buffer.from(cipher).toString("base64")
   const script =
     "Add-Type -AssemblyName System.Security; " +
@@ -1723,22 +1746,30 @@ async function sqliteAll(file, sql) {
 }
 
 async function importLocalAccount(explicitDir) {
+  const explicit = explicitDir && String(explicitDir).trim()
   const dirs = desktopDataDirs(explicitDir)
-  const dataDir = dirs.find((dir) => existsSync(join(dir, "Local State")))
+  // 目录判据放宽为「像 Electron profile」：Windows 靠 Local State，macOS 没有 ——
+  // 根 Cookies 库、Local State、Partitions 任一即命中；空目录不算数，
+  // 否则「目录不存在」和「目录在但没登录」两个错误会混成一条。
+  let dataDir = dirs.find((dir) => looksLikeDataDir(dir))
+  if (!dataDir) dataDir = dirs.find((dir) => clientCookieDbs(dir).length > 0)
   if (!dataDir) {
+    // 用户显式指定的目录即使空着也按「没登录」报：路径是他给的，不该说「没找到」；
+    // 但路径根本不存在时仍是「没找到」（多半拼错了）。
+    if (explicit && explicit === dirs[0] && existsSync(dirs[0])) {
+      return { error: "这个目录里没有已登录的 wps_sid —— 先在灵犀客户端登录一次，或改用浏览器登录" }
+    }
     return { error: `没有找到灵犀客户端数据目录（找过：${dirs.join("、")}）。装了客户端并登录过一次后再试，或用 MAGPIE_LINGXI_HOME 指定目录` }
   }
-  let key
-  try { key = chromiumKey(dataDir) } catch (error) { return { error: `读取客户端密钥失败：${error.message}` } }
+  // 只有 Windows（或目录里有 Local State）才需要解密 key；macOS 的 Chromium
+  // 不启用 OSCrypt，Cookie 值明文在 value 列，encrypted_value 分支在无 key 时跳过。
+  let key = null
+  // 解密仅当 Local State 存在（Windows OSCrypt）；macOS 明文布局没有它，直接读明文列
+  if (existsSync(join(dataDir, "Local State"))) {
+    try { key = chromiumKey(dataDir) } catch (error) { return { error: `读取客户端密钥失败：${error.message}` } }
+  }
 
-  const dbs = []
-  const add = (file) => { if (existsSync(file)) dbs.push(file) }
-  add(join(dataDir, "Network", "Cookies"))
-  try {
-    for (const name of readdirSync(join(dataDir, "Partitions"))) {
-      add(join(dataDir, "Partitions", name, "Network", "Cookies"))
-    }
-  } catch {}
+  const dbs = clientCookieDbs(dataDir)
 
   for (const file of dbs) {
     let rows
@@ -1751,6 +1782,7 @@ async function importLocalAccount(explicitDir) {
       const name = String(row.name || "")
       let value = row.value ? String(row.value) : ""
       if (!value && row.encrypted_value) {
+        if (!key) continue
         try { value = decryptCookieValue(key, Buffer.from(row.encrypted_value)) } catch { continue }
       }
       if (!/^[\x21-\x7e]+$/.test(value)) continue
@@ -2156,6 +2188,13 @@ export const _internal = {
   runExpertConversationViaAigc,
   runTaskConversation,
   setGroupWSFactory(fn) { groupWSFactory = fn },
+  desktopDataDirs,
+  looksLikeDataDir,
+  clientCookieDbs,
+  sqliteAll,
+  decryptCookieValue,
+  chromiumKey,
+  dpapiDecrypt,
   createGroupChatWith,
   deleteGroupChat,
   agentChat,
