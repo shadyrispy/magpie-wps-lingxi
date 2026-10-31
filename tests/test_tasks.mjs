@@ -3,6 +3,10 @@
 //
 //   node tests/test_tasks.mjs --sid "wps_sid=…; uid=…"
 //   WPS_SID=... node tests/test_tasks.mjs
+//   node tests/test_tasks.mjs --from-magpie            # 用 magpie 里已登录的 wps-lingxi 账号
+//   node tests/test_tasks.mjs --from-magpie --session <id>
+//                                                      # 没有「已完成会话」时，指定一个会话 id
+//                                                      # 直接建群，专门采建群 400 的响应
 //
 // 做的事：
 //   1. 列出任务中心（前后各一次，打印 status 变化）
@@ -18,9 +22,18 @@ const argOf = (name) => {
   return i >= 0 ? args[i + 1] : ""
 }
 
-const RAW = argOf("sid") || process.env.WPS_SID || ""
+let RAW = argOf("sid") || process.env.WPS_SID || ""
+if (!RAW && args.includes("--from-magpie")) {
+  const { readMagpieCookie } = await import("./magpie-cred.mjs")
+  const found = readMagpieCookie()
+  if (found.error) {
+    console.error("从 magpie 取凭据失败：", found.error)
+    process.exit(2)
+  }
+  RAW = found.cookie
+}
 if (!RAW) {
-  console.error("缺少凭据：用 --sid 传入 wps_sid（或整段 Cookie），或设置 WPS_SID。")
+  console.error("缺少凭据：用 --sid 传入 wps_sid（或整段 Cookie），或设置 WPS_SID，或加 --from-magpie。")
   process.exit(2)
 }
 
@@ -91,19 +104,27 @@ function oneTime(tasks) {
   return tasks.filter((t) => t?.type === "one_time" && t?.task_key)
 }
 
+// 上游的会话完成态字段换过：老接口给 execution_status / terminal_status（"completed"），
+// 现在 /api/public/v1/sessions/<id> 给 data.status = "finished"（另带 session_status: 0）。
+// 只认老字段会一直判「没有已完成的会话」，建群那步永远走不到——建群 400 也就永远采不到。
+const DONE_STATES = new Set(["completed", "finished", "success", "succeeded"])
+
 async function pickCompletedSession(base) {
   const r = await call(base, "/api/public/v1/session_list?limit=30&exclude_agent=false&session_types=cowork_client&session_types=cowork_web&session_types=chat")
   if (!r.ok) return { error: `session_list HTTP ${r.status}` }
   const list = Array.isArray(r.json?.data?.list) ? r.json.data.list : []
+  let scanned = 0
   for (const s of list) {
     const id = String(s?.session_id ?? "")
     if (!id) continue
     const d = await call(base, `/api/public/v1/sessions/${id}`).catch(() => null)
     if (!d?.ok) continue
-    const status = d.json?.data?.execution_status || d.json?.data?.terminal_status
-    if (status === "completed") return { id }
+    scanned++
+    const data = d.json?.data || {}
+    const status = String(data.status || data.execution_status || data.terminal_status || "")
+    if (DONE_STATES.has(status)) return { id, status }
   }
-  return { error: `没有已完成的会话（扫了 ${list.length} 个）` }
+  return { error: `没有已完成的会话（扫了 ${scanned}/${list.length} 个）` }
 }
 
 async function main() {
@@ -121,10 +142,12 @@ async function main() {
 
   const group = oneTime(before.tasks).find((t) => t.action === "group_chat")
   if (group?.status === "incomplete") {
-    console.log("\n群聊任务未完成 → 找已完成会话建群…")
-    const pick = await pickCompletedSession(base)
+    const forced = argOf("session")
+    console.log(forced ? "\n群聊任务未完成 → 用 --session 指定的会话建群…" : "\n群聊任务未完成 → 找已完成会话建群…")
+    const pick = forced ? { id: String(forced) } : await pickCompletedSession(base)
     if (pick.error) {
       console.log(`  跳过：${pick.error}`)
+      console.log("  提示：没有已完成会话时，用 --session <id> 指定一个，专门采建群 400 的响应。")
     } else {
       const created = await call(base, "/api/imchat/v1/channels", {
         method: "POST",
@@ -136,7 +159,12 @@ async function main() {
         const del = await call(base, `/api/imchat/v1/channels/${channelId}`, { method: "DELETE" })
         console.log(`  解散 ${del.ok ? "✓" : `✗ HTTP ${del.status}`}`)
       } else {
-        console.log(`  建群失败：HTTP ${created.status} ${created.text.slice(0, 120)}`)
+        console.log(`  建群失败：HTTP ${created.status}`)
+        console.log(`  请求体：session_id=${pick.id} expect_model=plan_pro`)
+        console.log(`  响应体：${created.text || "(空)"}`)
+        if (created.text.length > 120) {
+          console.log("  （上面是完整响应，不再截断 120 字——建群 400 的 body 是这次实测最需要的数据）")
+        }
       }
     }
   }

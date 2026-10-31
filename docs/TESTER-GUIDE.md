@@ -53,6 +53,13 @@ magpie accounts checkin        # 签到：领取每日智点 + 尝试一次性�
 # 信号实测：两条信号链 + 余额变化 + 任务状态前后对比（不打印 sid）
 node tests/test_signals.mjs
 node tests/test_tasks.mjs
+
+# 没装灵犀客户端（脚本默认要从客户端数据目录导入账号）时，改走 magpie 已登录的账号：
+node tests/test_signals.mjs --from-magpie
+node tests/test_tasks.mjs --from-magpie
+
+# 账号里没有「已完成会话」时，建群那步会被跳过；想采建群 400 的响应就指定会话 id：
+node tests/test_tasks.mjs --from-magpie --session <session_id>
 ```
 然后在 Magpie 里点一次签到（`magpie accounts checkin`），再跑一遍上面两条命令对比。
 
