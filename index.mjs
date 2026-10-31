@@ -814,7 +814,7 @@ async function createCreditsRun(base, cookie, sessionId, model, title, signal, {
   }, signal)
   const id = String(payload?.data?.run_id ?? "").trim()
   if (!id) throw new Error("灵犀未返回 run_id")
-  return id
+  return { runId: id, groupId: String(payload?.data?.group_id ?? id) }
 }
 
 async function ensureRun(cookie, key, model, title, signal, extra = {}, runExtra = {}) {
@@ -825,8 +825,8 @@ async function ensureRun(cookie, key, model, title, signal, extra = {}, runExtra
   for (const base of [BASE, KDOCS_BASE]) {
     try {
       const sessionId = await createCoworkSession(base, cookie, signal, extra)
-      const runId = await createCreditsRun(base, cookie, sessionId, model, title, signal, runExtra)
-      const run = { base, sessionId, runId, at: Date.now() }
+      const { runId, groupId } = await createCreditsRun(base, cookie, sessionId, model, title, signal, runExtra)
+      const run = { base, sessionId, runId, groupId, at: Date.now() }
       runs.set(key, run)
       return run
     } catch (error) {
@@ -1309,6 +1309,25 @@ async function pickTaskModel(cookie, base) {
   return "deepseek-v4.1-flash"
 }
 
+// 会话执行状态是客户端自己上报的（真实内核抓包）：
+//   run 创建后 PUT {group_id, status:"running", run_token:group_id, lease_seconds:90}
+//   对话完成后 PUT {status:"completed", terminal_reason:"completed"}
+// 不上报的话服务端永远不知道会话结束 —— 会话不到 completed，
+// 建群 400、任务翻转、会话列表状态全都会卡住。
+async function putExecutionStatus(cookie, base, run, status) {
+  const body = { group_id: run.groupId, status, run_token: run.groupId }
+  if (status === "running") body.lease_seconds = 90
+  if (status === "completed") body.terminal_reason = "completed"
+  try {
+    await fetch(`${base}/api/public/v1/sessions/${run.sessionId}/execution_status`, {
+      method: "PUT",
+      headers: { Cookie: clientCookie(cookie), "Content-Type": "application/json", "User-Agent": UA },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15000),
+    })
+  } catch {}
+}
+
 async function runTaskConversation(cookie, base, { clientType, sessionMode, currentMode, text } = {}) {
   const model = await pickTaskModel(cookie, base)
   const body = {
@@ -1333,6 +1352,7 @@ async function runTaskConversation(cookie, base, { clientType, sessionMode, curr
     }
     const signal = AbortSignal.timeout(120000)
     let run = await ensureRun(cookie, key, model, text || TASK_TEXT, signal, sessionExtra, runExtra)
+    await putExecutionStatus(cookie, base, run, "running")
     let response
     try {
       response = await requestAgent(cookie, run, buildAgentBody(body, model), signal, clientType)
@@ -1343,6 +1363,7 @@ async function runTaskConversation(cookie, base, { clientType, sessionMode, curr
       response = await requestAgent(cookie, run, buildAgentBody(body, model), signal, clientType)
     }
     const text2 = await response.text().catch(() => "")
+    await putExecutionStatus(cookie, base, run, "completed")
     if (!response.ok) return { ok: false, sessionId: run.sessionId, detail: `HTTP ${response.status} ${text2.slice(0, 120)}` }
     return { ok: true, sessionId: run.sessionId, detail: "对话完成" }
   } catch (error) {

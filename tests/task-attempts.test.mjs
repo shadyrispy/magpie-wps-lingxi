@@ -42,7 +42,7 @@ test('expert (aigc) and client (cowork) attempts send the right flags; cookies c
     }
     if (call.url.includes('/api/public/v1/credits/balance')) return Response.json({ data: { total_balance: 500 } })
     if (call.url.endsWith('/api/aioffice/v1/cowork/sessions')) return Response.json({ data: { session_id: 's1' } })
-    if (call.url.endsWith('/api/public/v1/credits/runs')) return Response.json({ data: { run_id: 'r1' } })
+    if (call.url.endsWith('/api/public/v1/credits/runs')) return Response.json({ data: { run_id: 'r1', group_id: 'g1' } })
     if (call.url.endsWith('/api/public/v1/agent-runtime/chat/completions')) {
       return new Response('data: {"code":"Success","choices":[{"text":"ok","finish_reason":"stop"}]}\n\n', {
         headers: { 'content-type': 'text/event-stream' },
@@ -88,6 +88,14 @@ test('expert (aigc) and client (cowork) attempts send the right flags; cookies c
 
     // aigc 平面只是兜底：cowork 成功就不该出现
     assert.equal(net.calls.filter((c) => c.url.includes('/api/aigc/v3/')).length, 0)
+
+    // 会话执行状态生命周期：对话前 running、对话后 completed（真实内核抓包）
+    const execPuts = net.calls.filter((c) => c.url.endsWith('/execution_status') && c.method === 'PUT')
+    assert.equal(execPuts.length, 2)
+    assert.equal(execPuts[0].body.status, 'running')
+    assert.equal(execPuts[0].body.run_token, 'g1')
+    assert.equal(execPuts[1].body.status, 'completed')
+    assert.equal(execPuts[1].body.terminal_reason, 'completed')
 
     // 群聊：直接复用这次对话的会话建群（不扫历史）
     const channels = net.calls.filter((c) => c.url.endsWith('/api/imchat/v1/channels') && c.method === 'POST')
