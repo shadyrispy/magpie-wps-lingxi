@@ -86,6 +86,13 @@ POST /api/public/v1/tasks/{task_key}/claim         # 领奖（空 body，可选 
   对任何会话（包括真实客户端的历史会话）都返回 400 InvalidArgument。
   主假设：任务 claimed 后服务端关闭建群通道 → **建群验证必须用未领任务账号**。
 
+### 2.39 计费判定实测（issue #5 三轮验证，2026-10-31）
+- **扣费与会话翻转取决于会话/run 的 `client_type=lingxi_claw`**，与 HTTP/WS 通道无关：
+  同一账号四个入口对照（aigc 对话、cowork+client_type、网关流式×2），
+  只有带 `client_type` 的那轮产生扣费（+1 智点），其余 Δ=0。
+- 任务翻转路径：`execution_status` 生命周期（running→completed，客户端自报）+ 会话 `client_type`
+  → 干净账号三任务全自动闭环已实测（issue #5 第三轮：+400 建群翻转）。
+
 ### 2.4 插件走的通路
 ```
 POST /api/aioffice/v1/cowork/sessions      # 建会话（可带 client_type / session_mode）
