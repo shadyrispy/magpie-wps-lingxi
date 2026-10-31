@@ -4,6 +4,8 @@
 // 验证请求形状与扣费，翻转验证需要未领任务的账号。
 //
 //   node tests/test_signals.mjs [--sid "..."]        # 缺省用本机灵犀客户端导入
+//   node tests/test_signals.mjs --from-magpie        # 用 magpie 里已登录的 wps-lingxi 账号
+//                                                    #（没装客户端就走这条；不打印 sid）
 //
 // 输出不包含完整 sid。
 
@@ -24,6 +26,12 @@ async function main() {
   if (raw) {
     cred = _internal.parseCookieInput(raw)
     if (!cred) { console.error("没有在 --sid 里找到 wps_sid"); process.exit(2) }
+  } else if (args.includes("--from-magpie")) {
+    const { readMagpieCookie } = await import("./magpie-cred.mjs")
+    const found = readMagpieCookie()
+    if (found.error) { console.error("从 magpie 取凭据失败：", found.error); process.exit(2) }
+    cred = _internal.parseCookieInput(found.cookie)
+    if (!cred) { console.error("magpie 账号槽里的凭据没有 wps_sid"); process.exit(2) }
   } else {
     cred = await importLocalAccount()
     if (cred?.error) { console.error("导入失败：", cred.error); process.exit(2) }
